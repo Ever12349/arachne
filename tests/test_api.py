@@ -41,6 +41,9 @@ def test_get_extract_success(api_client: TestClient):
     assert data["main_text"]
     assert data["truncated"] is False
     assert "cached" not in data
+    assert data["profile_id"] == ""
+    assert data["profile_version"] == ""
+    assert data["profile_fallback"] is False
     assert "description" in data["metadata"]
     assert "og" in data["metadata"]
     assert data["metadata"]["og"]["title"] == "OG Title"

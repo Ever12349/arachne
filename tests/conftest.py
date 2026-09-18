@@ -15,6 +15,7 @@ from app.main import app
 FIXTURES = Path(__file__).parent / "fixtures"
 SAMPLE_HTML = (FIXTURES / "sample.html").read_text(encoding="utf-8")
 EMPTY_HTML = (FIXTURES / "empty.html").read_text(encoding="utf-8")
+ARTICLE_PROFILE_HTML = (FIXTURES / "article_profile.html").read_text(encoding="utf-8")
 CHALLENGE_CF_HTML = (FIXTURES / "challenge_cf.html").read_text(encoding="utf-8")
 CHALLENGE_ATTENTION_HTML = (FIXTURES / "challenge_attention.html").read_text(encoding="utf-8")
 
@@ -81,6 +82,13 @@ def api_client(public_dns, monkeypatch: pytest.MonkeyPatch):
 def set_high_qps(client: TestClient, qps: int = 10_000) -> None:
     """Replace the process limiter so a test can issue many extract calls."""
     client.app.state.rate_limiter = FixedWindowRateLimiter(qps=qps)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_profiles_dir(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
+    """Keep tests off the default ./data/profiles and the shipped examples dir."""
+    directory = tmp_path_factory.mktemp("profiles")
+    monkeypatch.setattr("app.config.PROFILES_DIR", str(directory))
 
 
 @pytest.fixture(autouse=True)

@@ -50,6 +50,10 @@ CACHE_MAXSIZE = _env_int("ARACHNE_CACHE_MAXSIZE", 256)
 SESSIONS_DIR = os.environ.get("ARACHNE_SESSIONS_DIR", "./data/sessions")
 SESSION_KEY = os.environ.get("ARACHNE_SESSION_KEY", "")
 
+# Default is an empty local dir, not profiles/examples (examples are docs only).
+PROFILES_DIR = os.environ.get("ARACHNE_PROFILES_DIR", "./data/profiles")
+PROFILE_RELOAD_DEBOUNCE_SECONDS = 1.0
+
 MAX_RETRIES = _env_int("ARACHNE_MAX_RETRIES", 2)
 RETRY_BACKOFF_SECONDS = _env_floats("ARACHNE_RETRY_BACKOFF_SECONDS", [0.5, 1.0])
 

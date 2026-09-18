@@ -1,0 +1,11 @@
+{
+  "id": "example-com",
+  "version": "1",
+  "hosts": ["example.com"],
+  "title_selector": "h1.article-title",
+  "main_selector": "article .content",
+  "remove_selectors": [".ads", "nav"],
+  "meta": { "description": "meta[name='description']" },
+  "strict": false,
+  "disable_links": false
+}

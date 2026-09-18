@@ -1,4 +1,4 @@
-"""Arachne P2: synchronous URL → structured JSON extract for AI agents."""
+"""Arachne P3: synchronous URL → structured JSON extract for AI agents."""
 
 from __future__ import annotations
 
@@ -12,20 +12,21 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app import config
 from app.cache import ResultCache
-from app.config import CACHE_MAXSIZE, CACHE_TTL_SECONDS, MAX_CONCURRENCY, QPS
 from app.errors import ArachneError, http_status_for
 from app.fetch import create_http_client
 from app.limits import FixedWindowRateLimiter, Stats, extract_semaphore
 from app.logging_setup import setup_logging
 from app.models import ErrorResponse, ExtractRequest, ExtractResponse, StatsResponse
+from app.profiles.loader import ProfileRegistry
 from app.service import run_extract
 
 setup_logging()
 logger = logging.getLogger("arachne")
 
 ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
-    400: {"model": ErrorResponse, "description": "bad_url | session_invalid"},
+    400: {"model": ErrorResponse, "description": "bad_url | session_invalid | profile_invalid"},
     403: {"model": ErrorResponse, "description": "challenge_detected"},
     422: {"model": ErrorResponse, "description": "unsupported_content | extract_empty | too_large"},
     429: {"model": ErrorResponse, "description": "rate_limited"},
@@ -40,16 +41,17 @@ ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with create_http_client() as client:
         app.state.http_client = client
-        app.state.extract_cache = ResultCache(maxsize=CACHE_MAXSIZE, ttl=CACHE_TTL_SECONDS)
-        app.state.rate_limiter = FixedWindowRateLimiter(qps=QPS)
-        app.state.extract_semaphore = extract_semaphore(MAX_CONCURRENCY)
+        app.state.extract_cache = ResultCache(maxsize=config.CACHE_MAXSIZE, ttl=config.CACHE_TTL_SECONDS)
+        app.state.rate_limiter = FixedWindowRateLimiter(qps=config.QPS)
+        app.state.extract_semaphore = extract_semaphore(config.MAX_CONCURRENCY)
         app.state.stats = Stats()
+        app.state.profile_registry = ProfileRegistry.from_config()
         yield
 
 
 app = FastAPI(
     title="arachne",
-    version="0.3.0",
+    version="0.4.0",
     description="Synchronous URL → structured JSON extract for AI agents.",
     lifespan=lifespan,
 )
@@ -108,6 +110,7 @@ async def _run_extract(
     session_id: str | None = None,
     ua_strategy: str = "default",
     render: bool = False,
+    site_profile: str | None = None,
 ) -> ExtractResponse:
     state = request.app.state
     return await run_extract(
@@ -119,6 +122,8 @@ async def _run_extract(
         session_id=session_id,
         ua_strategy=ua_strategy,
         render=render,
+        site_profile=site_profile,
+        profiles=state.profile_registry,
         cache=state.extract_cache,
         limiter=state.rate_limiter,
         semaphore=state.extract_semaphore,
@@ -155,4 +160,5 @@ async def extract_post(
         session_id=body.session_id,
         ua_strategy=body.ua_strategy,
         render=body.render,
+        site_profile=body.site_profile,
     )

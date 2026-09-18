@@ -43,7 +43,15 @@ def session_fingerprint(headers: dict[str, str], cookies: dict[str, str]) -> str
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-CacheKey = tuple[str, str, str, str]
+CacheKey = tuple[str, str, str, str, str]
+
+
+def profile_cache_token(profile_id: str = "", profile_version: str = "") -> str:
+    """`profile_id@version`, or empty when no profile is selected."""
+    pid = (profile_id or "").strip()
+    if not pid:
+        return ""
+    return f"{pid}@{(profile_version or '').strip()}"
 
 
 def cache_key(
@@ -53,14 +61,17 @@ def cache_key(
     *,
     render: bool = False,
     ua_strategy: str = "default",
+    profile_id: str = "",
+    profile_version: str = "",
 ) -> CacheKey:
-    """Key is normalized URL + merged session fingerprint + render flag + ua_strategy."""
+    """Key is normalized URL + session fingerprint + render + ua_strategy + profile token."""
     strategy = ua_strategy or "default"
     return (
         normalize_cache_url(url),
         session_fingerprint(headers, cookies),
         "1" if render else "0",
         strategy,
+        profile_cache_token(profile_id, profile_version),
     )
 
 

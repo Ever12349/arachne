@@ -35,6 +35,10 @@ class ExtractRequest(BaseModel):
         default=False,
         description="If true, fetch via headless Playwright (POST only; optional extra install)",
     )
+    site_profile: str | None = Field(
+        default=None,
+        description="Optional profile id to force (POST only). Missing/invalid → profile_invalid",
+    )
 
 
 class OgMetadata(BaseModel):
@@ -64,6 +68,9 @@ class ExtractResponse(BaseModel):
     metadata: PageMetadata
     links: list[Link]
     truncated: bool = False
+    profile_id: str = ""
+    profile_version: str = ""
+    profile_fallback: bool = False
 
 
 class ErrorBody(BaseModel):
