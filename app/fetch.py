@@ -18,6 +18,14 @@ from app.ssrf import assert_public_http_url
 
 HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})
 
+# httpx requires all four fields; connect/read are the locked P0 values.
+HTTP_TIMEOUT = httpx.Timeout(
+    connect=CONNECT_TIMEOUT,
+    read=READ_TIMEOUT,
+    write=READ_TIMEOUT,
+    pool=CONNECT_TIMEOUT,
+)
+
 
 @dataclass(frozen=True)
 class FetchedPage:
@@ -37,12 +45,7 @@ def create_http_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(
         follow_redirects=True,
         max_redirects=MAX_REDIRECTS,
-        timeout=httpx.Timeout(
-            connect=CONNECT_TIMEOUT,
-            read=READ_TIMEOUT,
-            write=READ_TIMEOUT,
-            pool=CONNECT_TIMEOUT,
-        ),
+        timeout=HTTP_TIMEOUT,
         verify=True,
         headers={"User-Agent": USER_AGENT},
         event_hooks={"request": [ssrf_request_hook]},

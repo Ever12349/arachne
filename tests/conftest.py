@@ -58,14 +58,6 @@ def _handler_for(
 
 
 @pytest.fixture
-def mock_transport_factory():
-    def factory(**kwargs) -> httpx.MockTransport:
-        return httpx.MockTransport(_handler_for(**kwargs))
-
-    return factory
-
-
-@pytest.fixture
 def api_client(public_dns, monkeypatch: pytest.MonkeyPatch):
     """TestClient whose upstream HTTP is mocked to return SAMPLE_HTML."""
 
