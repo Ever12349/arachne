@@ -39,6 +39,21 @@ One-click (build and run in the background):
 docker compose up --build -d
 ```
 
+If Docker Hub is blocked (common in mainland China), overlay the mirror Compose file so the Python base image is pulled from a China-accessible mirror:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.mirror.yml up --build -d
+```
+
+The overlay defaults to `docker.m.daocloud.io/library/python:3.12-slim`. Public mirrors change; if that host is down, pick another `library/python:3.12-slim` mirror (for example Aliyun) and override `PYTHON_IMAGE`.
+
+Override the base image without editing files:
+
+```bash
+docker compose build --build-arg PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.12-slim
+docker compose up -d
+```
+
 Health check:
 
 ```bash
@@ -62,6 +77,12 @@ Without Compose:
 ```bash
 docker build -t arachne .
 docker run --rm -p 8000:8000 arachne
+```
+
+Same `PYTHON_IMAGE` override for a plain `docker build`:
+
+```bash
+docker build --build-arg PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.12-slim -t arachne .
 ```
 
 Pass `ARACHNE_USER_AGENT` the same way as a local run (`-e` on `docker run`, or `environment:` in Compose). Do not bake credentials into the image.
