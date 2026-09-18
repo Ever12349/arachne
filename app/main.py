@@ -1,4 +1,4 @@
-"""Arachne P3: synchronous URL → structured JSON extract for AI agents."""
+"""Arachne P4: URL → structured JSON extract, with in-process batch jobs."""
 
 from __future__ import annotations
 
@@ -16,6 +16,9 @@ from app import config
 from app.cache import ResultCache
 from app.errors import ArachneError, http_status_for
 from app.fetch import create_http_client
+from app.jobs.router import router as jobs_router
+from app.jobs.store import JobStore
+from app.jobs.worker import JobWorker
 from app.limits import FixedWindowRateLimiter, Stats, extract_semaphore
 from app.logging_setup import setup_logging
 from app.models import ErrorResponse, ExtractRequest, ExtractResponse, StatsResponse
@@ -30,6 +33,7 @@ ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
     403: {"model": ErrorResponse, "description": "challenge_detected"},
     422: {"model": ErrorResponse, "description": "unsupported_content | extract_empty | too_large"},
     429: {"model": ErrorResponse, "description": "rate_limited"},
+    404: {"model": ErrorResponse, "description": "job_not_found"},
     500: {"model": ErrorResponse, "description": "internal"},
     501: {"model": ErrorResponse, "description": "render_unavailable"},
     502: {"model": ErrorResponse, "description": "fetch_failed | unauthorized_upstream | render_failed"},
@@ -46,13 +50,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.extract_semaphore = extract_semaphore(config.MAX_CONCURRENCY)
         app.state.stats = Stats()
         app.state.profile_registry = ProfileRegistry.from_config()
-        yield
+        app.state.job_store = JobStore(
+            maxsize=config.JOB_MAX_STORED,
+            ttl=config.JOB_TTL_SECONDS,
+        )
+        worker = JobWorker(app, app.state.job_store)
+        app.state.job_worker = worker
+        await worker.start()
+        try:
+            yield
+        finally:
+            await worker.stop()
 
 
 app = FastAPI(
     title="arachne",
-    version="0.4.0",
-    description="Synchronous URL → structured JSON extract for AI agents.",
+    version="0.5.0",
+    description="URL → structured JSON extract for AI agents, with in-process batch jobs.",
     lifespan=lifespan,
 )
 
@@ -162,3 +176,6 @@ async def extract_post(
         render=body.render,
         site_profile=body.site_profile,
     )
+
+
+app.include_router(jobs_router)
