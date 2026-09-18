@@ -78,11 +78,22 @@ def _decode_body(body: bytes, content_type: str) -> str:
         return body.decode("utf-8", errors="replace")
 
 
-async def fetch_url(client: httpx.AsyncClient, url: str) -> FetchedPage:
+async def fetch_url(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+) -> FetchedPage:
     """GET `url`, following redirects, capping the body at MAX_BODY_BYTES."""
     await assert_public_http_url(url)
     try:
-        async with client.stream("GET", url) as response:
+        async with client.stream(
+            "GET",
+            url,
+            headers=headers or None,
+            cookies=cookies or None,
+        ) as response:
             content_type = response.headers.get("content-type", "")
             length_header = response.headers.get("content-length")
             if length_header is not None:

@@ -7,7 +7,7 @@ from urllib.parse import urljoin, urlparse
 import trafilatura
 from lxml import html as lxml_html
 
-from app.config import MAIN_TEXT_MAX_CHARS, MAX_LINKS
+from app.config import LINK_TEXT_MAX_CHARS, MAIN_TEXT_MAX_CHARS, MAX_LINKS
 from app.errors import extract_empty
 from app.models import ExtractResponse, Link, OgMetadata, PageMetadata
 from app.ssrf import normalize_host
@@ -62,7 +62,13 @@ def _should_skip_href(raw: str) -> bool:
     lowered = raw.strip().lower()
     if not lowered:
         return True
-    return lowered.startswith("javascript:") or lowered.startswith("mailto:")
+    if lowered.startswith("#"):
+        return True
+    return (
+        lowered.startswith("javascript:")
+        or lowered.startswith("mailto:")
+        or lowered.startswith("tel:")
+    )
 
 
 def collect_links(tree: lxml_html.HtmlElement, base_url: str, limit: int = MAX_LINKS) -> list[Link]:
@@ -83,7 +89,10 @@ def collect_links(tree: lxml_html.HtmlElement, base_url: str, limit: int = MAX_L
         if absolute in seen:
             continue
         seen.add(absolute)
-        link = Link(href=absolute, text=_clean(el.text_content()))
+        text = _clean(el.text_content())
+        if len(text) > LINK_TEXT_MAX_CHARS:
+            text = text[:LINK_TEXT_MAX_CHARS]
+        link = Link(href=absolute, text=text)
         if normalize_host(parsed.hostname) == page_host:
             same_host.append(link)
         else:
@@ -132,8 +141,6 @@ def extract_html(
 
     title = _clean(traf_meta.title if traf_meta else "") or _html_title(tree) or _clean(og.title)
     main_text = _clean(traf_text) or _fallback_text(tree)
-    if len(main_text) > MAIN_TEXT_MAX_CHARS:
-        main_text = main_text[:MAIN_TEXT_MAX_CHARS]
 
     if not title and not main_text:
         raise extract_empty()
@@ -157,4 +164,18 @@ def extract_html(
             ),
         ),
         links=links,
+        truncated=False,
     )
+
+
+def apply_max_chars(response: ExtractResponse, max_chars: int | None) -> ExtractResponse:
+    """Cap main_text after cache: omit max_chars → hard cap; else clamp to [1, hard cap]."""
+    if max_chars is None:
+        limit = MAIN_TEXT_MAX_CHARS
+    else:
+        limit = max(1, min(int(max_chars), MAIN_TEXT_MAX_CHARS))
+    truncated = len(response.main_text) > limit
+    text = response.main_text[:limit] if truncated else response.main_text
+    if text == response.main_text and truncated == response.truncated:
+        return response
+    return response.model_copy(update={"main_text": text, "truncated": truncated})
