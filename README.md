@@ -51,15 +51,15 @@ Docker Hub timeouts and PyPI timeouts are independent. A DaoCloud (or other) bas
 docker compose -f docker-compose.yml -f docker-compose.mirror.yml up --build -d
 ```
 
-Defaults in the overlay: `PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.12-slim` and Tsinghua pip (`https://pypi.tuna.tsinghua.edu.cn/simple`). Public mirrors change; swap hosts if one is down. For pip, Aliyun is an alternative: `PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple` and `PIP_TRUSTED_HOST=mirrors.aliyun.com`.
+Defaults in the overlay: `PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.12-slim` and Aliyun pip (`https://mirrors.aliyun.com/pypi/simple`). Public mirrors change; swap hosts if one is down. Tsinghua (`https://pypi.tuna.tsinghua.edu.cn/simple`) may return HTTP 403 from some networks and Docker builds; it remains an alternate: `PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple` and `PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn`.
 
 Override without editing files:
 
 ```bash
 docker compose build \
   --build-arg PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.12-slim \
-  --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
-  --build-arg PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+  --build-arg PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple \
+  --build-arg PIP_TRUSTED_HOST=mirrors.aliyun.com
 docker compose up -d
 ```
 
@@ -93,8 +93,8 @@ Same image and pip-index overrides for a plain `docker build`:
 ```bash
 docker build \
   --build-arg PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.12-slim \
-  --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
-  --build-arg PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn \
+  --build-arg PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple \
+  --build-arg PIP_TRUSTED_HOST=mirrors.aliyun.com \
   -t arachne .
 ```
 
