@@ -1,5 +1,5 @@
-# Overlay for environments where Docker Hub is blocked (e.g. mainland China).
-# Public mirrors change; swap PYTHON_IMAGE if this host is unreachable.
+# Overlay for environments where Docker Hub and/or PyPI are blocked (e.g. mainland China).
+# Public mirrors change; swap PYTHON_IMAGE / PIP_INDEX_URL if a host is unreachable.
 # Usage: docker compose -f docker-compose.yml -f docker-compose.mirror.yml up --build -d
 services:
   arachne:
@@ -7,3 +7,5 @@ services:
       context: .
       args:
         PYTHON_IMAGE: docker.m.daocloud.io/library/python:3.12-slim
+        PIP_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
+        PIP_TRUSTED_HOST: pypi.tuna.tsinghua.edu.cn
