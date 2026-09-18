@@ -1,4 +1,4 @@
-"""Arachne P5: URL → structured JSON extract, with persisted batch jobs."""
+"""Arachne P6: URL → structured JSON extract, with persisted jobs and profile suggest."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from app.limits import FixedWindowRateLimiter, Stats, extract_semaphore
 from app.logging_setup import setup_logging
 from app.models import ErrorResponse, ExtractRequest, ExtractResponse, StatsResponse
 from app.profiles.loader import ProfileRegistry
+from app.profiles.router import router as profiles_router
 from app.service import run_extract
 
 setup_logging()
@@ -33,12 +34,13 @@ logger = logging.getLogger("arachne")
 ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
     400: {"model": ErrorResponse, "description": "bad_url | session_invalid | profile_invalid"},
     403: {"model": ErrorResponse, "description": "challenge_detected"},
+    409: {"model": ErrorResponse, "description": "profile_exists"},
     422: {"model": ErrorResponse, "description": "unsupported_content | extract_empty | too_large"},
     429: {"model": ErrorResponse, "description": "rate_limited"},
     404: {"model": ErrorResponse, "description": "job_not_found"},
     500: {"model": ErrorResponse, "description": "internal"},
-    501: {"model": ErrorResponse, "description": "render_unavailable"},
-    502: {"model": ErrorResponse, "description": "fetch_failed | unauthorized_upstream | render_failed"},
+    501: {"model": ErrorResponse, "description": "render_unavailable | llm_unavailable"},
+    502: {"model": ErrorResponse, "description": "fetch_failed | unauthorized_upstream | render_failed | llm_failed"},
     504: {"model": ErrorResponse, "description": "timeout"},
 }
 
@@ -79,8 +81,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="arachne",
-    version="0.6.0",
-    description="URL → structured JSON extract for AI agents, with SQLite-backed batch jobs.",
+    version="0.7.0",
+    description="URL → structured JSON extract for AI agents, with SQLite-backed batch jobs and profile suggest.",
     lifespan=lifespan,
 )
 
@@ -193,3 +195,4 @@ async def extract_post(
 
 
 app.include_router(jobs_router)
+app.include_router(profiles_router)

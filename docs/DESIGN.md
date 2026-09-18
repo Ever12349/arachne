@@ -1,8 +1,8 @@
 # arachne 设计文档
 
-> 版本：v0.6.0 · 受众：维护者与调用方（AI Agent 系统）  
+> 版本：v0.7.0 · 受众：维护者与调用方（AI Agent 系统）  
 > 仓库：https://github.com/Ever12349/arachne  
-> 状态：P5 已落地（SQLite 持久化 jobs：`GET /jobs/{id}` 读库、`GET /jobs/search`、`DELETE /jobs/{id}`、可选 `X-Arachne-Client`）。Worker 仍为进程内 asyncio。默认镜像仍不含浏览器。无 Redis / PostgreSQL / webhook / API key。会话仍为 Fernet 文件。
+> 状态：P6 已落地（半自动站点 profiles：`POST /profiles/suggest` 不写盘、`POST /profiles` 写入全局 `ARACHNE_PROFILES_DIR`）。P5 SQLite jobs 仍有效。Worker 仍为进程内 asyncio。默认镜像仍不含浏览器。无 Redis / PostgreSQL / webhook / API key。会话仍为 Fernet 文件。可选 OpenAI 兼容 LLM（`ARACHNE_LLM_*`）仅用于 suggest。
 
 ## 1. 定位
 
@@ -13,7 +13,7 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 - 契约稳定、字段语义清晰
 - 错误可机读（`error.code`）
 - 延迟与体量可控（超时、响应上限、链接封顶、QPS/并发、缓存）
-- 可在 Agent 工作流里同步调用（P0–P3），或提交批量 jobs 后轮询（P4）；任务与结果落 SQLite（P5）
+- 可在 Agent 工作流里同步调用（P0–P3），或提交批量 jobs 后轮询（P4）；任务与结果落 SQLite（P5）；半自动生成站点 profile（P6）
 
 **非定位**：通用浏览器自动化 IDE、恶意爬虫框架、认证攻击工具。
 
@@ -30,6 +30,7 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 | 站点专用规则（P3） | `ARACHNE_PROFILES_DIR` 下 JSON profiles；POST `site_profile` 或按最终 URL host 自动匹配 |
 | 批量队列（P4） | 进程内 `asyncio.Queue`；`POST /jobs` / `GET /jobs/{id}` / `POST /jobs/{id}/cancel`；轮询，无 list、无 webhook |
 | 任务持久化（P5） | SQLite（SQLAlchemy 2.x async + aiosqlite）；DB 为 jobs 唯一真源；`X-Arachne-Client` 隔离；`GET /jobs/search`；`DELETE /jobs/{id}` |
+| 半自动 profiles（P6） | `POST /profiles/suggest`（heuristic / 可选 LLM，不写盘）+ `POST /profiles`（校验后写入 `{id}.json`，`overwrite`） |
 
 ### 2.2 安全与合规边界（硬约束）
 
@@ -42,9 +43,9 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 
 ## 3. API 契约（面向 Agent）
 
-契约版本 **0.6.0**。
+契约版本 **0.7.0**。
 
-### 3.1 端点（P5）
+### 3.1 端点（P6）
 
 | 方法 | 路径 | 作用 |
 |------|------|------|
@@ -57,6 +58,8 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 | `GET` | `/jobs/search?url=&limit=` | 按 URL 精确匹配搜索（见 §3.10）；默认 `limit=20`，最大 100 |
 | `DELETE` | `/jobs/{id}` | 删除该 client 下的任务；成功 204 |
 | `POST` | `/jobs/{id}/cancel` | 取消仍为 pending 的 item；running 跑完并记录结果；已终态幂等 200 |
+| `POST` | `/profiles/suggest` | 拉取页面并建议 P3 profile；**不写盘**；走全局 QPS + 抽取 semaphore（见 §3.11） |
+| `POST` | `/profiles` | 校验并写入 `ARACHNE_PROFILES_DIR/{id}.json`；`overwrite` 默认 false（见 §3.11） |
 
 POST `/extract` JSON：
 
@@ -122,7 +125,7 @@ HTTP 状态与业务码分离；body 统一：
 ```json
 {
   "error": {
-    "code": "bad_url | session_invalid | profile_invalid | challenge_detected | fetch_failed | timeout | unsupported_content | too_large | unauthorized_upstream | extract_empty | rate_limited | render_unavailable | render_failed | job_not_found | internal",
+    "code": "bad_url | session_invalid | profile_invalid | profile_exists | challenge_detected | fetch_failed | timeout | unsupported_content | too_large | unauthorized_upstream | extract_empty | rate_limited | render_unavailable | render_failed | llm_unavailable | llm_failed | job_not_found | internal",
     "message": "人类可读短句",
     "detail": {}
   }
@@ -136,13 +139,14 @@ HTTP 状态与业务码分离；body 统一：
 | `bad_url` | 400 |
 | `session_invalid` | 400 |
 | `profile_invalid` | 400 |
+| `profile_exists` | 409 |
 | `challenge_detected` | 403 |
 | `unsupported_content` / `extract_empty` / `too_large` | 422 |
 | `rate_limited` | 429 |
 | `job_not_found` | 404 |
 | `timeout` | 504 |
-| `fetch_failed` / `unauthorized_upstream` / `render_failed` | 502 |
-| `render_unavailable` | 501 |
+| `fetch_failed` / `unauthorized_upstream` / `render_failed` / `llm_failed` | 502 |
+| `render_unavailable` / `llm_unavailable` | 501 |
 | `internal` | 500 |
 
 上游 `status >= 400` **不抽取**（挑战页除外，见 §3.7）：401/403 → `unauthorized_upstream`，其余 → `fetch_failed`；`detail` 含 `status_code`。
@@ -194,7 +198,7 @@ python scripts/write_session.py --id demo \
 }
 ```
 
-计数只覆盖抽取流水线（含 `rate_limited` / `session_invalid` 等）。`/health` 与 `/stats` 自身不计入。
+计数只覆盖抽取流水线（含 `rate_limited` / `session_invalid` 等，以及 `POST /profiles/suggest`）。`/health` 与 `/stats` 自身不计入。`POST /profiles` 写盘不计入。
 
 ### 3.6 调用约定（给 Agent 集成）
 
@@ -355,6 +359,60 @@ while true; do
 done
 ```
 
+### 3.11 半自动站点 profiles（P6）
+
+两步：**建议**（只读、不写盘）再由调用方 **确认写入**。手写 JSON 可直接 `POST /profiles`，不要求先 suggest。目录全局共用（**无** per-client 子目录）。写入后走现有 ProfileRegistry 热加载（`force` reload，不等 debounce）。
+
+**`POST /profiles/suggest`（不写盘）**
+
+与 `POST /extract` 共用全局 QPS 与抽取 `asyncio.Semaphore`；复用 session / headers / cookies / `render` / SSRF / 挑战检测 / HTML 闸门。不走 extract 结果缓存。找不到可用选择器 → `extract_empty`（422）。
+
+| 字段 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `url` | string | 必填 | http(s) URL |
+| `headers` / `cookies` / `session_id` / `render` | 同 extract | 省略 | 可选；`ua_strategy` **不**出现在 suggest body（上游 UA 为 default） |
+| `strategy` | `"heuristic"` \| `"llm"` \| `"auto"` | `"heuristic"` | 见下 |
+
+成功：
+
+```json
+{
+  "profile": { "id": "example-com", "version": "1", "hosts": ["example.com"], "title_selector": "h1.headline", "main_selector": "div.entry-content", "remove_selectors": ["nav"], "meta": {"description": "meta[name='description']"}, "strict": false, "disable_links": false },
+  "evidence": {
+    "strategy_used": "heuristic",
+    "title_preview": "…",
+    "main_preview": "…",
+    "alternatives": [
+      {"title_selector": "h1", "main_selector": "article.post", "remove_selectors": ["nav"]}
+    ]
+  }
+}
+```
+
+- `profile` 为完整 P3 schema。`id` 由最终 URL 的 `normalize_host` 得到（点 → 短横，非法字符剔除，最长 64）
+- `evidence.strategy_used` 为实际采用的 `"heuristic"` 或 `"llm"`
+- `evidence.alternatives` 最多 3 条选择器变体（可省略）
+- `evidence.llm_skipped` 仅在 auto 未走成 LLM 时出现：`no_key`（无 `ARACHNE_LLM_API_KEY`）或 `llm_failed`（调用/校验失败后回退 heuristic）
+
+**策略**
+
+- `heuristic`：DOM 打分 → CSS 选择器；用 lxml 自测。默认 `title` ≥ 2 字符、`main` ≥ 80 字符（`ARACHNE_SUGGEST_MIN_TITLE_CHARS` / `ARACHNE_SUGGEST_MIN_MAIN_CHARS`），且与页面正文有重叠（`ARACHNE_SUGGEST_OVERLAP_RATIO`，默认 0.6，或为原文子串）
+- `llm`：OpenAI 兼容 `POST {ARACHNE_LLM_BASE_URL}/chat/completions`（`ARACHNE_LLM_API_KEY`、`ARACHNE_LLM_MODEL`）。请求带 DOM skeleton（约 200 节点 / 30k 字符，`ARACHNE_SUGGEST_SKELETON_MAX_*`）与 heuristic 草稿。解析 JSON 选择器后 **必须** lxml 自测。无 key → `llm_unavailable`（501）。调用失败或自测失败 → `llm_failed`（502），不回退
+- `auto`：有 key 则先 LLM（同样必须 lxml 校验）；失败则回退 heuristic 并 `llm_skipped=llm_failed`。无 key 则只跑 heuristic，`llm_skipped=no_key`
+
+LLM 走独立 httpx 客户端（**不做** SSRF 拦截，便于运营商配置的 API 端点）；超时 `ARACHNE_LLM_TIMEOUT` 默认 30s。不在日志中写 API key。
+
+**`POST /profiles`（写盘）**
+
+```json
+{ "profile": { "id": "example-com", "version": "1", "hosts": ["example.com"], "title_selector": "h1.article-title", "main_selector": "article .content", "remove_selectors": [".ads"], "meta": {}, "strict": false, "disable_links": false }, "overwrite": false }
+```
+
+- `profile` 用现有 `SiteProfile` schema 校验；非法 → 400（校验信封 `bad_url`，与其它 POST 一致）
+- 写入 `{ARACHNE_PROFILES_DIR}/{id}.json`（文件名 stem 必须等于 `id`）
+- 文件已存在且 `overwrite` 不为 `true` → `profile_exists`（409）；`overwrite: true` 则替换
+- **无** per-client 子目录；手写合法。写成功后 `ProfileRegistry.maybe_reload(force=True)`
+
 ## 4. 架构
 
 ### 4.1 P3 同步流水线
@@ -375,7 +433,23 @@ Agent → FastAPI /extract
           → ExtractResponse JSON
 ```
 
-`/health` 与 `/stats` 不经过 QPS 与抽取信号量。`POST /jobs` 创建本身也不经过 QPS；job item 调用 `run_extract` 时才计入。
+`/health` 与 `/stats` 不经过 QPS 与抽取信号量。`POST /jobs` 创建本身也不经过 QPS；job item 调用 `run_extract` 时才计入。`POST /profiles` 写盘不走 QPS。`POST /profiles/suggest` **计入**全局 QPS，fetch/render 占用抽取 semaphore；heuristic/LLM 在释放 semaphore 之后运行。
+
+### 4.1.2 P6 suggest 流水线
+
+```
+Agent → POST /profiles/suggest
+          → 加载/合并 session_id（若有）
+          → QPS（全局固定 1s 窗口，与 /extract 共用）
+          → asyncio.Semaphore
+               → fetch(httpx) 或 render(Playwright)
+               → 挑战检测 → 状态码拒绝 → HTML 闸门
+          → heuristic DOM 打分 + lxml 自测
+          → （strategy=llm|auto 且有 key）LLM chat + lxml 再测
+          → { profile, evidence }（不写盘、不写 extract 缓存）
+Agent → POST /profiles {profile, overwrite}
+          → SiteProfile 校验 → 写 {id}.json → force reload
+```
 
 ### 4.1.1 P4/P5 批量流水线（进程内 worker + SQLite）
 
@@ -401,7 +475,7 @@ app/
   main.py            # 路由、lifespan（DB create_all、启动/停止 job worker）、错误映射
   db.py              # SQLAlchemy async engine / session / create_all
   models.py          # Pydantic 请求/响应/Error/Stats
-  config.py          # 超时、UA、体积、并发、QPS、缓存、会话、重试、渲染超时、profiles、jobs、DATABASE_URL
+  config.py          # 超时、UA、体积、并发、QPS、缓存、会话、重试、渲染超时、profiles、LLM、suggest 自测、jobs、DATABASE_URL
   errors.py          # ArachneError 与 HTTP 映射
   ssrf.py            # getaddrinfo + 非公网地址拒绝
   fetch.py           # httpx 异步拉取（可选 headers/cookies）
@@ -414,7 +488,7 @@ app/
   sessions.py        # Fernet 会话读写与合并（仍为文件，不进 DB）
   antibot.py         # 重试、UA 池、挑战标记
   render.py          # 可选 Playwright（动态 import）
-  profiles/          # P3 站点规则：schema / loader / apply
+  profiles/          # P3+P6：schema / loader / apply / suggest / llm / router
   jobs/              # models / tables / store（SQLite） / worker / router
 scripts/
   write_session.py   # 离线写入 {id}.bin
@@ -451,6 +525,8 @@ profiles/
 - 只缓存成功 `ExtractResponse`，不缓存错误（含 `challenge_detected` / `render_*` / `session_invalid` / `profile_invalid`）
 - 会话：`ARACHNE_SESSIONS_DIR`（默认 `./data/sessions`）、`ARACHNE_SESSION_KEY`
 - 站点规则：`ARACHNE_PROFILES_DIR`（默认 `./data/profiles`，可为空）；热加载 debounce 1s
+- Suggest 自测：`ARACHNE_SUGGEST_MIN_TITLE_CHARS=2`、`ARACHNE_SUGGEST_MIN_MAIN_CHARS=80`、`ARACHNE_SUGGEST_OVERLAP_RATIO=0.6`；skeleton `ARACHNE_SUGGEST_SKELETON_MAX_NODES=200`、`ARACHNE_SUGGEST_SKELETON_MAX_CHARS=30000`
+- LLM（可选）：`ARACHNE_LLM_BASE_URL`（默认 `https://api.openai.com/v1`，再拼 `/chat/completions`）、`ARACHNE_LLM_API_KEY`（空则 llm 不可用）、`ARACHNE_LLM_MODEL`（默认 `gpt-4o-mini`）、`ARACHNE_LLM_TIMEOUT=30`
 - 重试：`ARACHNE_MAX_RETRIES=2`，`ARACHNE_RETRY_BACKOFF_SECONDS=0.5,1`
 - 渲染超时：`ARACHNE_RENDER_TIMEOUT=15`
 - 批量 jobs：`ARACHNE_JOB_MAX_URLS=50`、`ARACHNE_JOB_CONCURRENCY=3`
@@ -467,7 +543,7 @@ profiles/
 
 ### 4.6 可观测性
 
-抽取日志字段：`latency_ms`、`error_code`、`cache`（hit/miss）、`session`（指纹前缀）、`profile`（`id@version` 或 `-`）、`url`。Job worker 另记 `job_id` / `total` / 终态。禁止记录 Cookie / Authorization / cookies / 会话明文。重试只记录 `attempt` / `delay_s` / `error_code`。
+抽取日志字段：`latency_ms`、`error_code`、`cache`（hit/miss）、`session`（指纹前缀）、`profile`（`id@version` 或 `-`）、`url`。Suggest 另记 `strategy`。Job worker 另记 `job_id` / `total` / 终态。禁止记录 Cookie / Authorization / cookies / 会话明文 / LLM API key。重试只记录 `attempt` / `delay_s` / `error_code`。
 
 ## 5. 实现分期（开发计划）
 
@@ -528,6 +604,18 @@ profiles/
 - [x] 会话材料仍为 Fernet 文件，**不**迁入 DB
 - [x] **不做**：PostgreSQL、Redis、API keys、webhooks
 
+### P6 — 半自动站点 profiles（已实现）
+
+- [x] `POST /profiles/suggest`：url + 可选 session/headers/cookies/render + `strategy` heuristic|llm|auto（默认 heuristic）；**不写盘**
+- [x] 与 `/extract` 共用全局 QPS + 抽取 semaphore；复用 fetch/session/render/SSRF
+- [x] heuristic：DOM 打分 → CSS；lxml 自测（可配置最小 title/main 长度 + 与页面文本重叠）；id 来自 normalize_host（点→短横）
+- [x] llm：OpenAI 兼容 chat；DOM skeleton + heuristic 草稿；JSON 选择器必须 lxml 校验；无 key → `llm_unavailable`（501）；失败 → `llm_failed`（502）
+- [x] auto：无 key 则 heuristic + `llm_skipped=no_key`；有 key 失败则回退 heuristic + `llm_skipped=llm_failed`
+- [x] 一条主 profile + evidence 中最多 3 条 alternatives
+- [x] `POST /profiles`：完整 P3 schema + `overwrite`（默认 false）；已存在且非 overwrite → `profile_exists`（409）；手写合法；全局目录
+- [x] 写入后 force reload 现有 ProfileRegistry
+- [x] **不做**：per-client 子目录、suggest 写盘、把 LLM SDK 加入默认依赖（用现有 httpx）
+
 ## 6. 路线图总览
 
 ```mermaid
@@ -538,6 +626,8 @@ flowchart LR
   P2 --> P4[P4 批量队列]
   P3 --> P4
   P4 --> P5[P5 持久化]
+  P3 --> P6[P6 半自动 profiles]
+  P5 --> P6
 ```
 
 与用户后续需求的对应关系：
@@ -547,29 +637,29 @@ flowchart LR
 | 登录态 / Cookie 抓取 | P1 注入 + P2 会话文件 | 调用方授权后注入或引用加密文件；非服务端代登破解 |
 | 反爬对抗 | P2 | 韧性与可观测，非攻击工具 |
 | 站点专用规则库 | P3 | 本地 JSON；非 DB |
+| 半自动生成规则 | P6 | suggest 不写盘；POST /profiles 确认写入 |
 | 批量队列 | P4 | 进程内队列 + 轮询 |
 | 持久化存储 | P5 | SQLite jobs；会话仍为文件 |
 | 「认证绕过」 | **不实现攻击型绕过** | 以受控会话 + 明确错误码替代 |
 
 ## 7. 与当前仓库状态
 
-- P5 已实现：同步 `/extract` 与批量 `/jobs`；jobs 落 SQLite，重启后 `GET /jobs/{id}` 仍可读；启动会重入未完成 job
-- 会话仍为 Fernet 文件；**无** PostgreSQL / Redis / webhook / API key
-- 运行时依赖钉死在 `requirements.txt`（`==`，含 `cachetools`、`cryptography`、`cssselect`、`sqlalchemy`、`aiosqlite`）；Playwright 见 `requirements-playwright.txt`
-- 单元测试默认不访问网络、不需要浏览器；活测：`ARACHNE_INTEGRATION=1 pytest -m integration`
+- P6 已实现：`POST /profiles/suggest` 与 `POST /profiles`；suggest 不写盘；写入全局 `ARACHNE_PROFILES_DIR`
+- P5 仍有效：同步 `/extract` 与批量 `/jobs`；jobs 落 SQLite
+- 会话仍为 Fernet 文件；**无** PostgreSQL / Redis / webhook / 服务端 API key（LLM key 仅环境变量，可选）
+- 运行时依赖钉死在 `requirements.txt`（`==`，含 `cachetools`、`cryptography`、`cssselect`、`sqlalchemy`、`aiosqlite`）；Playwright 见 `requirements-playwright.txt`；LLM 用 httpx，无额外 SDK
+- 单元测试默认不访问网络、不需要浏览器；LLM 路径 mock；活测：`ARACHNE_INTEGRATION=1 pytest -m integration`
 
-## 8. 验收（P5）
+## 8. 验收（P6）
 
-1. `uvicorn app.main:app` 可在**未安装 Playwright** 时启动；OpenAPI version `0.6.0`  
-2. `POST /jobs` 返回 202 `{job_id, status: queued, total}`；`GET /jobs/{id}` 从 DB 读，最终 `completed` 且成功 item 含完整 ExtractResponse  
-3. 部分 item 失败（如 `bad_url`）时 job 仍为 `completed`，失败 item 的 `result` 为 `{error:{code,message,detail}}`  
-4. `POST /jobs/{id}/cancel` 将 pending 标为 cancelled；running 收尾；对已终态 job 幂等 200  
-5. 未知 id / 错误 `X-Arachne-Client` → `job_not_found`（404）；`items` 超过 `ARACHNE_JOB_MAX_URLS` → `bad_url`（400）  
-6. 打满同步 QPS 后 `POST /jobs` 仍为 202（创建不消耗 QPS）；item 执行走现有 limiter  
-7. `GET /jobs/search?url=` 按 requested_url 或最终 url 精确匹配且按 client 过滤；`DELETE /jobs/{id}` 204  
-8. 同一 sqlite 文件上 create 后再 open 新 engine，`GET` 仍能读到 job  
-9. README 含 DB URL、volume、search、delete、client 头、重启仍可读  
-10. `pytest -m "not integration"` 通过（mock；不要求本机有浏览器）
+1. `uvicorn app.main:app` 可在**未安装 Playwright**、**未配置 LLM key** 时启动；OpenAPI version `0.7.0`  
+2. `POST /profiles/suggest`（heuristic）对有标题与足够正文的 HTML 返回 P3 `profile` + `evidence`；**不**在 `ARACHNE_PROFILES_DIR` 写文件；用返回的选择器跑 `extract_with_profile` 能抽到 title/main  
+3. `strategy=llm` 且无 `ARACHNE_LLM_API_KEY` → `llm_unavailable`（501）；`strategy=auto` 无 key → heuristic 且 `evidence.llm_skipped=no_key`  
+4. mock LLM 返回无法通过 lxml 自测的选择器且 `strategy=llm` → `llm_failed`（502）；`auto` 则回退 heuristic  
+5. `POST /profiles` 写入 `{id}.json`；再次提交同一 id 且 `overwrite` 不为 true → `profile_exists`（409）；`overwrite: true` 替换；随后 `/extract` 能按 host / 显式 id 命中（force reload）  
+6. suggest 与 extract 共用 QPS：打满 5 次 extract 后 suggest 为 `rate_limited`（429）  
+7. README / DESIGN 记录 API、env、overwrite、三种 strategy  
+8. `pytest -m "not integration"` 通过（mock；不要求本机有浏览器或 LLM）
 
 ---
 

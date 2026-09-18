@@ -25,6 +25,8 @@ from app.limits import FixedWindowRateLimiter, Stats
 from app.models import ExtractResponse
 from app.profiles.apply import extract_with_profile
 from app.profiles.loader import ProfileRegistry, resolve_profile
+from app.profiles.models import SuggestResponse, SuggestStrategy
+from app.profiles.suggest import suggest_from_html
 from app.render import render_url
 from app.sessions import load_session, merge_session_material
 
@@ -45,16 +47,15 @@ def _reject_error_status(page: FetchedPage) -> None:
     raise fetch_failed(f"Upstream returned {page.status_code}", detail)
 
 
-async def extract_page(
+async def fetch_ready_page(
     url: str,
     client: httpx.AsyncClient,
     *,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     render: bool = False,
-    site_profile: str | None = None,
-    profiles: ProfileRegistry | None = None,
-) -> ExtractResponse:
+) -> FetchedPage:
+    """Fetch or render, then apply challenge / status / HTML gates. No extract, no profile."""
     requested = (url or "").strip()
     if render:
         page = await render_url(requested, headers=headers, cookies=cookies)
@@ -67,6 +68,27 @@ async def extract_page(
             "Unsupported content type",
             {"content_type": page.content_type, "status_code": page.status_code},
         )
+    return page
+
+
+async def extract_page(
+    url: str,
+    client: httpx.AsyncClient,
+    *,
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+    render: bool = False,
+    site_profile: str | None = None,
+    profiles: ProfileRegistry | None = None,
+) -> ExtractResponse:
+    requested = (url or "").strip()
+    page = await fetch_ready_page(
+        requested,
+        client,
+        headers=headers,
+        cookies=cookies,
+        render=render,
+    )
     try:
         profile = resolve_profile(profiles, site_profile=site_profile, url=page.final_url)
         return extract_with_profile(
@@ -207,3 +229,92 @@ async def run_extract(
         if entered_inflight:
             stats.in_flight -= 1
         finish_log()
+
+
+def _log_suggest(
+    *,
+    url: str,
+    strategy: str,
+    latency_ms: float,
+    error_code: str | None,
+    session_prefix: str,
+) -> None:
+    logger.info(
+        "suggest url=%s strategy=%s latency_ms=%.2f error_code=%s session=%s",
+        url,
+        strategy or "-",
+        latency_ms,
+        error_code or "-",
+        session_prefix,
+    )
+
+
+async def run_suggest(
+    *,
+    url: str,
+    client: httpx.AsyncClient,
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+    session_id: str | None = None,
+    render: bool = False,
+    strategy: SuggestStrategy = "heuristic",
+    limiter: FixedWindowRateLimiter,
+    semaphore: asyncio.Semaphore,
+    stats: Stats,
+) -> SuggestResponse:
+    """QPS → semaphore fetch/render → heuristic/LLM suggest. No cache, no disk write."""
+    t0 = time.perf_counter()
+    stats.requests_total += 1
+    error_code: str | None = None
+    session_prefix = "-"
+    requested = (url or "").strip()
+    entered_inflight = False
+    used_strategy = strategy or "heuristic"
+
+    try:
+        session = load_session(session_id)
+        merged = merge_session_material(session, cookies, headers)
+        safe_headers = filter_request_headers(merged.headers)
+        safe_cookies = dict(merged.cookies)
+        fingerprint = session_fingerprint(safe_headers, safe_cookies)
+        session_prefix = fingerprint[:_SESSION_PREFIX_LEN]
+
+        if not await limiter.try_acquire():
+            raise rate_limited()
+
+        stats.in_flight += 1
+        entered_inflight = True
+        upstream_headers = headers_for_upstream(safe_headers, "default")
+        async with semaphore:
+            page = await fetch_ready_page(
+                requested,
+                client,
+                headers=upstream_headers or None,
+                cookies=safe_cookies or None,
+                render=render,
+            )
+        result = await suggest_from_html(page.body, url=page.final_url, strategy=used_strategy)
+        used_strategy = result.evidence.strategy_used
+        return result
+    except ArachneError as exc:
+        error_code = exc.code
+        stats.errors_by_code[exc.code] += 1
+        raise
+    except Exception:
+        error_code = INTERNAL
+        stats.errors_by_code[INTERNAL] += 1
+        logger.exception("unhandled suggest error")
+        raise ArachneError(INTERNAL, "Internal server error") from None
+    finally:
+        if entered_inflight:
+            stats.in_flight -= 1
+        latency_ms = (time.perf_counter() - t0) * 1000.0
+        stats.latency_ms_sum += latency_ms
+        stats.latency_ms_count += 1
+        _log_suggest(
+            url=requested,
+            strategy=used_strategy,
+            latency_ms=latency_ms,
+            error_code=error_code,
+            session_prefix=session_prefix,
+        )

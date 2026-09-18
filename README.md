@@ -2,9 +2,9 @@
 
 **URL → structured JSON** extract service for AI agents, with optional SQLite-backed batch jobs.
 
-P5 fetches HTML with `httpx` (optional headless Playwright) and extracts `title` / `main_text` / metadata / links. Optional JSON site profiles in `ARACHNE_PROFILES_DIR` override CSS title/main/meta. POST `/extract` may inject caller `cookies` / allowlisted `headers`, reference a Fernet-encrypted `session_id`, set `ua_strategy`, set `render`, or force `site_profile`. `POST /jobs` queues many URLs; poll `GET /jobs/{id}` (reads SQLite). Default install has **no** browsers, Redis, PostgreSQL, or webhooks. Job rows **survive process restart**; sessions stay Fernet files.
+The service fetches HTML with `httpx` (optional headless Playwright) and extracts `title` / `main_text` / metadata / links. Optional JSON site profiles in `ARACHNE_PROFILES_DIR` override CSS title/main/meta. `POST /profiles/suggest` proposes a profile from a live page (no disk write); `POST /profiles` saves one. POST `/extract` may inject caller `cookies` / allowlisted `headers`, reference a Fernet-encrypted `session_id`, set `ua_strategy`, set `render`, or force `site_profile`. `POST /jobs` queues many URLs; poll `GET /jobs/{id}` (reads SQLite). Default install has **no** browsers, Redis, PostgreSQL, or webhooks. Job rows **survive process restart**; sessions stay Fernet files.
 
-API contract version **0.6.0**.
+API contract version **0.7.0**.
 
 ## Install
 
@@ -49,6 +49,12 @@ export ARACHNE_MAX_RETRIES=2
 export ARACHNE_RETRY_BACKOFF_SECONDS=0.5,1
 export ARACHNE_RENDER_TIMEOUT=15
 export ARACHNE_PROFILES_DIR=./data/profiles
+export ARACHNE_LLM_BASE_URL=https://api.openai.com/v1
+export ARACHNE_LLM_API_KEY=""        # required for strategy=llm; auto without key stays heuristic
+export ARACHNE_LLM_MODEL=gpt-4o-mini
+export ARACHNE_LLM_TIMEOUT=30
+export ARACHNE_SUGGEST_MIN_TITLE_CHARS=2
+export ARACHNE_SUGGEST_MIN_MAIN_CHARS=80
 export ARACHNE_JOB_MAX_URLS=50
 export ARACHNE_JOB_CONCURRENCY=3
 export ARACHNE_DATABASE_URL=sqlite+aiosqlite:///./data/arachne.db
@@ -187,6 +193,55 @@ Every success body includes `profile_id` and `profile_version` (`""` if none) an
 
 Cache keys include `profile_id@version` as well as URL, session fingerprint, `render`, and `ua_strategy`. Bump `version` when you change selectors.
 
+### Suggest a profile (`POST /profiles/suggest`)
+
+Fetches the page (same session / headers / cookies / `render` / SSRF / QPS / extract semaphore as `/extract`) and returns a P3 profile **without writing disk**. `strategy` is `heuristic` (default), `llm`, or `auto`.
+
+Heuristic scores the DOM, builds CSS selectors, and self-tests them with lxml: title ≥ `ARACHNE_SUGGEST_MIN_TITLE_CHARS` (2), main ≥ `ARACHNE_SUGGEST_MIN_MAIN_CHARS` (80), plus overlap with page text. `id` is the normalized host with dots turned into dashes (`www.example.com` → `example-com`).
+
+`llm` calls an OpenAI-compatible `POST {ARACHNE_LLM_BASE_URL}/chat/completions` with `ARACHNE_LLM_API_KEY` and `ARACHNE_LLM_MODEL`. The prompt includes a DOM skeleton (~200 nodes / ~30k chars) and the heuristic draft. Parsed JSON selectors **must** pass the same lxml self-test. No key → `llm_unavailable` (501). Call or verify failure → `llm_failed` (502). `auto` without a key stays heuristic and sets `evidence.llm_skipped=no_key`; with a key, LLM failure falls back to heuristic and sets `llm_skipped=llm_failed`.
+
+One primary `profile` plus up to three `evidence.alternatives` (selector variants).
+
+```bash
+curl -X POST http://127.0.0.1:8000/profiles/suggest \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com/article","strategy":"heuristic"}'
+```
+
+```json
+{
+  "profile": {
+    "id": "example-com",
+    "version": "1",
+    "hosts": ["example.com"],
+    "title_selector": "h1.headline",
+    "main_selector": "div.entry-content",
+    "remove_selectors": ["nav", ".ads"],
+    "meta": {"description": "meta[name='description']"},
+    "strict": false,
+    "disable_links": false
+  },
+  "evidence": {
+    "strategy_used": "heuristic",
+    "title_preview": "Suggested Article Headline",
+    "main_preview": "This is the unique main article body…"
+  }
+}
+```
+
+### Write a profile (`POST /profiles`)
+
+Validates the full P3 schema and writes `ARACHNE_PROFILES_DIR/{id}.json`. Hand-authored profiles are fine (no prior suggest). Global directory only — no per-client subdirs. After a successful write the in-memory registry reloads immediately.
+
+If `{id}.json` already exists and `overwrite` is not `true`, the response is `profile_exists` (409). Pass `"overwrite": true` to replace.
+
+```bash
+curl -X POST http://127.0.0.1:8000/profiles \
+  -H 'Content-Type: application/json' \
+  -d '{"profile":{"id":"example-com","version":"1","hosts":["example.com"],"title_selector":"h1.article-title","main_selector":"article .content","remove_selectors":[".ads","nav"],"meta":{"description":"meta[name=\'description\']"},"strict":false,"disable_links":false},"overwrite":false}'
+```
+
 ## Extract
 
 `GET` or `POST /extract`. Prefer `POST` when sending cookies, headers, `session_id`, `ua_strategy`, `render`, or `site_profile`.
@@ -272,7 +327,7 @@ Timeouts and connection errors are retried (`ARACHNE_MAX_RETRIES=2`, backoff 0.5
 
 Agent client timeout should be slightly above the server read timeout (15s); **≥ 20s** is a reasonable default. Leave more room when `render=true`.
 
-Global extract QPS is a fixed 1-second window of 5 (override with `ARACHNE_QPS`). Cache misses (including Playwright) are also limited by `ARACHNE_MAX_CONCURRENCY` (default 10). `/health`, `/stats`, and **creating** a job (`POST /jobs`) are exempt. Each job item still goes through `run_extract` and therefore the limiter.
+Global extract QPS is a fixed 1-second window of 5 (override with `ARACHNE_QPS`). Cache misses (including Playwright) are also limited by `ARACHNE_MAX_CONCURRENCY` (default 10). `/health`, `/stats`, **creating** a job (`POST /jobs`), and `POST /profiles` (write) are exempt. `POST /profiles/suggest` **does** consume QPS and the extract semaphore. Each job item still goes through `run_extract` and therefore the limiter.
 
 ## Batch jobs
 
@@ -382,13 +437,14 @@ Branch on `error.code`, not on `message`.
 | `bad_url` | 400 |
 | `session_invalid` | 400 |
 | `profile_invalid` | 400 |
+| `profile_exists` | 409 |
 | `challenge_detected` | 403 |
 | `unsupported_content`, `extract_empty`, `too_large` | 422 |
 | `rate_limited` | 429 |
 | `job_not_found` | 404 |
 | `timeout` | 504 |
-| `fetch_failed`, `unauthorized_upstream`, `render_failed` | 502 |
-| `render_unavailable` | 501 |
+| `fetch_failed`, `unauthorized_upstream`, `render_failed`, `llm_failed` | 502 |
+| `render_unavailable`, `llm_unavailable` | 501 |
 | `internal` | 500 |
 
 Upstream 401/403 become `unauthorized_upstream` unless the body looks like a challenge (`challenge_detected`). Other `status >= 400` become `fetch_failed`. Both include `detail.status_code`. Only `http`/`https` URLs are accepted; private, loopback, link-local, and unspecified addresses are rejected as `bad_url`. Cookie / Authorization / session plaintext is never written to logs.
@@ -409,9 +465,12 @@ How the new P2/P3 codes are verified without a real site or browser:
 | `challenge_detected` | Mock httpx to return `tests/fixtures/challenge_cf.html` / `challenge_attention.html` as 200 or 403 (`tests/test_antibot.py`) |
 | `render_unavailable` | `monkeypatch` `app.render.playwright_available` to `False` and POST `"render": true` (`tests/test_render.py`) |
 | `profile_invalid` | POST `site_profile` with a missing id or illegal id (`tests/test_profiles.py`) |
+| `profile_exists` | POST `/profiles` twice without `overwrite` (`tests/test_profiles_write.py`) |
+| `llm_unavailable` | POST `/profiles/suggest` with `"strategy":"llm"` and empty `ARACHNE_LLM_API_KEY` (`tests/test_profiles_suggest.py`) |
+| `llm_failed` | Mock LLM selectors that fail lxml self-test with `"strategy":"llm"` (`tests/test_profiles_suggest.py`) |
 | `job_not_found` | `GET` or cancel an unknown / expired job id (`tests/test_jobs.py`) |
 
-`tests/test_jobs.py` covers create / poll / cancel / per-item errors / QPS. `tests/test_jobs_persistence.py` covers SQLite reopen, URL search, delete, `X-Arachne-Client` isolation, and TTL cleanup.
+`tests/test_jobs.py` covers create / poll / cancel / per-item errors / QPS. `tests/test_jobs_persistence.py` covers SQLite reopen, URL search, delete, `X-Arachne-Client` isolation, and TTL cleanup. `tests/test_profiles_suggest.py` covers heuristic suggest, `llm_unavailable`, mocked LLM verify/fail, auto fallback, and that suggest does not write disk. `tests/test_profiles_write.py` covers 409 / overwrite / hot-reload after write.
 
 `tests/test_jobs.py` covers create 202, per-item failure still `completed`, cancel, `job_not_found`, max URLs, and that creating a job does not burn QPS.
 
