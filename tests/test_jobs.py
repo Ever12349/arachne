@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 import uuid
 
@@ -89,14 +90,19 @@ def test_per_item_failure_job_still_completed(api_client: TestClient):
 
 
 def test_cancel_pending_running_finishes(api_client: TestClient, monkeypatch: pytest.MonkeyPatch):
-    async def slow_extract(**kwargs):
-        await asyncio.sleep(0.35)
+    entered = threading.Event()
+    release = threading.Event()
+
+    async def gated_extract(**kwargs):
+        loop = asyncio.get_running_loop()
+        entered.set()
+        await loop.run_in_executor(None, lambda: release.wait(timeout=5))
         result = _dummy_extract()
         result.requested_url = kwargs["url"]
         return result
 
     monkeypatch.setattr("app.config.JOB_CONCURRENCY", 1)
-    monkeypatch.setattr("app.jobs.worker.run_extract", slow_extract)
+    monkeypatch.setattr("app.jobs.worker.run_extract", gated_extract)
 
     response = api_client.post(
         "/jobs",
@@ -110,34 +116,52 @@ def test_cancel_pending_running_finishes(api_client: TestClient, monkeypatch: py
     )
     assert response.status_code == 202
     job_id = response.json()["job_id"]
+    assert entered.wait(timeout=3), "first item never started"
 
-    deadline = time.monotonic() + 3
-    data = None
-    while time.monotonic() < deadline:
-        data = api_client.get(f"/jobs/{job_id}").json()
-        if any(item["status"] == "running" for item in data["items"]):
-            break
-        time.sleep(0.02)
-    else:
-        raise AssertionError(f"job never showed a running item: {data}")
+    try:
+        cancel = api_client.post(f"/jobs/{job_id}/cancel")
+        assert cancel.status_code == 200
+        cancelled_view = cancel.json()
+        assert any(item["status"] == "cancelled" for item in cancelled_view["items"])
+        assert any(item["status"] == "running" for item in cancelled_view["items"])
+
+        release.set()
+        final = _poll_job(api_client, job_id)
+        assert final["status"] == "cancelled"
+        statuses = [item["status"] for item in final["items"]]
+        assert "pending" not in statuses
+        assert "cancelled" in statuses
+        assert "succeeded" in statuses
+        assert final["cancelled_count"] >= 1
+        assert final["succeeded_count"] >= 1
+
+        again = api_client.post(f"/jobs/{job_id}/cancel")
+        assert again.status_code == 200
+        assert again.json()["status"] == "cancelled"
+    finally:
+        release.set()
+
+
+def test_cancel_queued_job(api_client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    async def drop(_job_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(api_client.app.state.job_worker, "enqueue", drop)
+    response = api_client.post(
+        "/jobs",
+        json={"items": [{"url": "https://example.com/a"}, {"url": "https://example.com/b"}]},
+    )
+    job_id = response.json()["job_id"]
+    queued = api_client.get(f"/jobs/{job_id}").json()
+    assert queued["status"] == "queued"
+    assert all(item["status"] == "pending" for item in queued["items"])
 
     cancel = api_client.post(f"/jobs/{job_id}/cancel")
     assert cancel.status_code == 200
-    cancelled_view = cancel.json()
-    assert any(item["status"] == "cancelled" for item in cancelled_view["items"])
-
-    final = _poll_job(api_client, job_id)
-    assert final["status"] == "cancelled"
-    statuses = [item["status"] for item in final["items"]]
-    assert "pending" not in statuses
-    assert "cancelled" in statuses
-    assert "succeeded" in statuses
-    assert final["cancelled_count"] >= 1
-    assert final["succeeded_count"] >= 1
-
-    again = api_client.post(f"/jobs/{job_id}/cancel")
-    assert again.status_code == 200
-    assert again.json()["status"] == "cancelled"
+    body = cancel.json()
+    assert body["status"] == "cancelled"
+    assert body["cancelled_count"] == 2
+    assert all(item["status"] == "cancelled" for item in body["items"])
 
 
 def test_cancel_idempotent_on_completed(api_client: TestClient):
