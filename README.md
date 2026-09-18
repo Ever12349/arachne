@@ -1,10 +1,10 @@
 # arachne
 
-**URL → structured JSON** extract service for AI agents, with optional in-process batch jobs.
+**URL → structured JSON** extract service for AI agents, with optional SQLite-backed batch jobs.
 
-P4 fetches HTML with `httpx` (optional headless Playwright) and extracts `title` / `main_text` / metadata / links. Optional JSON site profiles in `ARACHNE_PROFILES_DIR` override CSS title/main/meta. POST `/extract` may inject caller `cookies` / allowlisted `headers`, reference a Fernet-encrypted `session_id`, set `ua_strategy`, set `render`, or force `site_profile`. `POST /jobs` queues many URLs and you poll `GET /jobs/{id}`. In-process QPS, concurrency, and a 60s TTL cache are on. Default install has **no** browsers, Redis, or database. **Restarting the process drops all jobs.**
+P5 fetches HTML with `httpx` (optional headless Playwright) and extracts `title` / `main_text` / metadata / links. Optional JSON site profiles in `ARACHNE_PROFILES_DIR` override CSS title/main/meta. POST `/extract` may inject caller `cookies` / allowlisted `headers`, reference a Fernet-encrypted `session_id`, set `ua_strategy`, set `render`, or force `site_profile`. `POST /jobs` queues many URLs; poll `GET /jobs/{id}` (reads SQLite). Default install has **no** browsers, Redis, PostgreSQL, or webhooks. Job rows **survive process restart**; sessions stay Fernet files.
 
-API contract version **0.5.0**.
+API contract version **0.6.0**.
 
 ## Install
 
@@ -51,8 +51,8 @@ export ARACHNE_RENDER_TIMEOUT=15
 export ARACHNE_PROFILES_DIR=./data/profiles
 export ARACHNE_JOB_MAX_URLS=50
 export ARACHNE_JOB_CONCURRENCY=3
-export ARACHNE_JOB_TTL_SECONDS=3600
-export ARACHNE_JOB_MAX_STORED=100
+export ARACHNE_DATABASE_URL=sqlite+aiosqlite:///./data/arachne.db
+export ARACHNE_JOB_DB_TTL_SECONDS=0   # 0 = keep completed jobs forever
 uvicorn app.main:app
 ```
 
@@ -64,13 +64,15 @@ Default image stays **browser-free**:
 docker compose up --build -d
 ```
 
+Compose mounts `./data:/app/data` so `arachne.db`, sessions, and profiles survive container recreation. The default `ARACHNE_DATABASE_URL` is `sqlite+aiosqlite:///./data/arachne.db`.
+
 Playwright image (Chromium + system deps):
 
 ```bash
 docker build -f Dockerfile.playwright -t arachne:playwright .
 docker run --rm -p 8000:8000 \
   -e ARACHNE_SESSION_KEY \
-  -v "$(pwd)/data/sessions:/app/data/sessions" \
+  -v "$(pwd)/data:/app/data" \
   arachne:playwright
 ```
 
@@ -134,7 +136,7 @@ Pass `ARACHNE_USER_AGENT` and the other `ARACHNE_*` settings the same way as a l
 ```bash
 docker run --rm -p 8000:8000 \
   -e ARACHNE_PROFILES_DIR=/app/data/profiles \
-  -v "$(pwd)/data/profiles:/app/data/profiles" \
+  -v "$(pwd)/data:/app/data" \
   arachne
 ```
 
@@ -274,7 +276,11 @@ Global extract QPS is a fixed 1-second window of 5 (override with `ARACHNE_QPS`)
 
 ## Batch jobs
 
-Submit a list of URLs, then poll. There is **no** `GET /jobs` list and **no** webhooks. State lives in memory (`ARACHNE_JOB_TTL_SECONDS=3600`, `ARACHNE_JOB_MAX_STORED=100`). A process restart loses every job.
+Submit a list of URLs, then poll. There is **no** `GET /jobs` list and **no** webhooks. Jobs live in SQLite (`ARACHNE_DATABASE_URL`, default `sqlite+aiosqlite:///./data/arachne.db`). A process restart keeps job rows; `GET /jobs/{id}` reads the database. The in-process worker re-queues unfinished jobs on startup (interrupted `running` items go back to `pending`). Sessions are **not** stored in the DB.
+
+Optional header `X-Arachne-Client` sets `client_id` (default `"default"`). `GET /jobs/{id}`, `DELETE /jobs/{id}`, `GET /jobs/search`, and cancel only see that client's jobs. A mismatch returns `job_not_found` (404) so another tenant cannot probe ids.
+
+`ARACHNE_JOB_DB_TTL_SECONDS=0` keeps completed/cancelled jobs forever. A positive value deletes terminal jobs older than that many seconds.
 
 `items` length is `1..ARACHNE_JOB_MAX_URLS` (default 50). Per-item fields inherit `defaults` when omitted. Each item calls the same `run_extract` path as `POST /extract` (QPS, cache, profiles, render). A job runs with `ARACHNE_JOB_CONCURRENCY` (default 3) item tasks at a time.
 
@@ -295,6 +301,7 @@ Poll until `status` is `completed` or `cancelled`:
 ```bash
 JOB_ID=3fa85f64-5717-4562-b3fc-2c963f66afa6
 curl "http://127.0.0.1:8000/jobs/$JOB_ID"
+curl -H 'X-Arachne-Client: my-agent' "http://127.0.0.1:8000/jobs/$JOB_ID"
 ```
 
 Job statuses: `queued` | `running` | `completed` | `cancelled`. Item statuses: `pending` | `running` | `succeeded` | `failed` | `cancelled`. Counts: `total`, `succeeded_count`, `failed_count`, `cancelled_count`. A succeeded item inlines a full extract body as `result`. A failed item uses the same error envelope as the sync API:
@@ -322,7 +329,19 @@ Cancel pending items (`running` items finish and record a result). Already-termi
 curl -X POST "http://127.0.0.1:8000/jobs/$JOB_ID/cancel"
 ```
 
-Unknown or expired ids return `job_not_found` (404).
+Search by exact item `requested_url` or the extract result's final `url` (`limit` default 20, max 100):
+
+```bash
+curl 'http://127.0.0.1:8000/jobs/search?url=https://example.com&limit=20'
+```
+
+Delete (HTTP 204), same client only:
+
+```bash
+curl -X DELETE "http://127.0.0.1:8000/jobs/$JOB_ID"
+```
+
+Unknown ids or a different `X-Arachne-Client` return `job_not_found` (404).
 
 ## Stats
 
@@ -392,7 +411,7 @@ How the new P2/P3 codes are verified without a real site or browser:
 | `profile_invalid` | POST `site_profile` with a missing id or illegal id (`tests/test_profiles.py`) |
 | `job_not_found` | `GET` or cancel an unknown / expired job id (`tests/test_jobs.py`) |
 
-`tests/test_profiles.py` also covers host match (including `www.`), lexicographic host conflicts, `strict` → `extract_empty`, `profile_fallback`, and cache keys that include `profile_id@version`.
+`tests/test_jobs.py` covers create / poll / cancel / per-item errors / QPS. `tests/test_jobs_persistence.py` covers SQLite reopen, URL search, delete, `X-Arachne-Client` isolation, and TTL cleanup.
 
 `tests/test_jobs.py` covers create 202, per-item failure still `completed`, cancel, `job_not_found`, max URLs, and that creating a job does not burn QPS.
 

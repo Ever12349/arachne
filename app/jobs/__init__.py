@@ -1,1 +1,1 @@
-"""In-process batch extract jobs (P4)."""
+"""In-process batch extract jobs with SQLite persistence (P5)."""

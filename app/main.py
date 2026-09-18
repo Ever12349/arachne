@@ -1,10 +1,11 @@
-"""Arachne P4: URL → structured JSON extract, with in-process batch jobs."""
+"""Arachne P5: URL → structured JSON extract, with persisted batch jobs."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 import httpx
 from fastapi import Depends, FastAPI, Query, Request
@@ -14,6 +15,7 @@ from fastapi.responses import JSONResponse
 
 from app import config
 from app.cache import ResultCache
+from app.db import create_db_engine, init_db, session_factory
 from app.errors import ArachneError, http_status_for
 from app.fetch import create_http_client
 from app.jobs.router import router as jobs_router
@@ -43,6 +45,9 @@ ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    engine = create_db_engine()
+    await init_db(engine)
+    app.state.db_engine = engine
     async with create_http_client() as client:
         app.state.http_client = client
         app.state.extract_cache = ResultCache(maxsize=config.CACHE_MAXSIZE, ttl=config.CACHE_TTL_SECONDS)
@@ -50,23 +55,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.extract_semaphore = extract_semaphore(config.MAX_CONCURRENCY)
         app.state.stats = Stats()
         app.state.profile_registry = ProfileRegistry.from_config()
-        app.state.job_store = JobStore(
-            maxsize=config.JOB_MAX_STORED,
-            ttl=config.JOB_TTL_SECONDS,
-        )
-        worker = JobWorker(app, app.state.job_store)
+        store = JobStore(session_factory(engine))
+        app.state.job_store = store
+        worker = JobWorker(app, store)
         app.state.job_worker = worker
         await worker.start()
+        for job_id in await store.recover_incomplete():
+            await worker.enqueue(job_id)
+        cleanup_task: asyncio.Task[None] | None = None
+        if config.JOB_DB_TTL_SECONDS > 0:
+            interval = float(min(60, max(1, config.JOB_DB_TTL_SECONDS)))
+            cleanup_task = asyncio.create_task(store.run_cleanup_loop(interval), name="arachne-job-ttl")
         try:
             yield
         finally:
+            if cleanup_task is not None:
+                cleanup_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await cleanup_task
             await worker.stop()
+            await engine.dispose()
 
 
 app = FastAPI(
     title="arachne",
-    version="0.5.0",
-    description="URL → structured JSON extract for AI agents, with in-process batch jobs.",
+    version="0.6.0",
+    description="URL → structured JSON extract for AI agents, with SQLite-backed batch jobs.",
     lifespan=lifespan,
 )
 

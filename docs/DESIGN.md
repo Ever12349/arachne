@@ -1,8 +1,8 @@
 # arachne 设计文档
 
-> 版本：v0.5.0 · 受众：维护者与调用方（AI Agent 系统）  
+> 版本：v0.6.0 · 受众：维护者与调用方（AI Agent 系统）  
 > 仓库：https://github.com/Ever12349/arachne  
-> 状态：P4 已落地（进程内批量 jobs：`POST /jobs`、轮询 `GET /jobs/{id}`、`POST /jobs/{id}/cancel`）。默认镜像仍不含浏览器。无 Redis / DB / webhook。进程重启丢失 jobs。
+> 状态：P5 已落地（SQLite 持久化 jobs：`GET /jobs/{id}` 读库、`GET /jobs/search`、`DELETE /jobs/{id}`、可选 `X-Arachne-Client`）。Worker 仍为进程内 asyncio。默认镜像仍不含浏览器。无 Redis / PostgreSQL / webhook / API key。会话仍为 Fernet 文件。
 
 ## 1. 定位
 
@@ -13,7 +13,7 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 - 契约稳定、字段语义清晰
 - 错误可机读（`error.code`）
 - 延迟与体量可控（超时、响应上限、链接封顶、QPS/并发、缓存）
-- 可在 Agent 工作流里同步调用（P0–P3），或提交批量 jobs 后轮询（P4）
+- 可在 Agent 工作流里同步调用（P0–P3），或提交批量 jobs 后轮询（P4）；任务与结果落 SQLite（P5）
 
 **非定位**：通用浏览器自动化 IDE、恶意爬虫框架、认证攻击工具。
 
@@ -29,7 +29,7 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 | 登录态与反爬韧性（P2） | 加密 `session_id`、超时/连接重试、UA 策略、挑战页识别、可选 `render` |
 | 站点专用规则（P3） | `ARACHNE_PROFILES_DIR` 下 JSON profiles；POST `site_profile` 或按最终 URL host 自动匹配 |
 | 批量队列（P4） | 进程内 `asyncio.Queue`；`POST /jobs` / `GET /jobs/{id}` / `POST /jobs/{id}/cancel`；轮询，无 list、无 webhook |
-| 可演进 | 持久化按路线图推进 |
+| 任务持久化（P5） | SQLite（SQLAlchemy 2.x async + aiosqlite）；DB 为 jobs 唯一真源；`X-Arachne-Client` 隔离；`GET /jobs/search`；`DELETE /jobs/{id}` |
 
 ### 2.2 安全与合规边界（硬约束）
 
@@ -42,9 +42,9 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 
 ## 3. API 契约（面向 Agent）
 
-契约版本 **0.5.0**。
+契约版本 **0.6.0**。
 
-### 3.1 端点（P4）
+### 3.1 端点（P5）
 
 | 方法 | 路径 | 作用 |
 |------|------|------|
@@ -53,7 +53,9 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 | `GET` | `/extract?url=&max_chars=` | 同步抽取；可选 `max_chars`。**无** cookies/headers/`session_id`/`ua_strategy`/`render`/`site_profile` |
 | `POST` | `/extract` | 同步抽取；见下表 JSON 字段 |
 | `POST` | `/jobs` | 提交批量抽取；HTTP 202；**创建本身不消耗**全局 QPS |
-| `GET` | `/jobs/{id}` | 任务状态、计数、每条 item 的 status/result |
+| `GET` | `/jobs/{id}` | 从 DB 读任务状态、计数、每条 item 的 status/result（按 `client_id` 隔离） |
+| `GET` | `/jobs/search?url=&limit=` | 按 URL 精确匹配搜索（见 §3.10）；默认 `limit=20`，最大 100 |
+| `DELETE` | `/jobs/{id}` | 删除该 client 下的任务；成功 204 |
 | `POST` | `/jobs/{id}/cancel` | 取消仍为 pending 的 item；running 跑完并记录结果；已终态幂等 200 |
 
 POST `/extract` JSON：
@@ -69,7 +71,7 @@ POST `/extract` JSON：
 | `render` | bool | `false` | `true` 时用 Playwright 取 HTML；未安装 → `render_unavailable` |
 | `site_profile` | string | 省略 | 按 profile id **强制**加载；缺文件或非法 id → `profile_invalid`（400）。省略则按最终 URL host 自动匹配 |
 
-**没有** `GET /jobs` 列表，也没有 webhook。GET 会话、成功响应上的 `cached` 字段、错误结果缓存：**不做**。
+**没有** `GET /jobs` 列表，也没有 webhook / API key / PostgreSQL / Redis。GET 会话、成功响应上的 `cached` 字段、错误结果缓存：**不做**。可选请求头 `X-Arachne-Client` 标识租户（缺省 `"default"`）；GET / DELETE / search / cancel 均按同一 `client_id` 过滤，不匹配时一律 `job_not_found`（404），避免泄漏。
 
 ### 3.2 成功响应
 
@@ -262,11 +264,13 @@ GET `/extract` 仍可按 host 自动匹配，但不能传 `site_profile`。
 
 修改选择器后应递增 `version`：缓存键含 `profile_id@version`，未升版本时可能在 TTL 内命中旧结果。
 
-### 3.10 批量 jobs（P4）
+### 3.10 批量 jobs（P4）与持久化（P5）
 
-进程内任务：`asyncio.Queue` + **单** consumer loop。内存存储 TTL `ARACHNE_JOB_TTL_SECONDS=3600`、最多 `ARACHNE_JOB_MAX_STORED=100`。**进程重启丢失全部 jobs**（含 queued / running）。无 Redis、无 DB、无 webhook、无 `GET /jobs` 列表。
+进程内 worker：`asyncio.Queue` + **单** consumer loop。**SQLite 为 jobs 唯一真源**（每次 job/item 状态变更 `await` 写入）。默认 `ARACHNE_DATABASE_URL=sqlite+aiosqlite:///./data/arachne.db`（启动时确保 `data/` 存在并用 `create_all` 建表）。**无 Alembic**；破坏性 schema 变更时再引入迁移。会话仍为 Fernet 文件（`ARACHNE_SESSIONS_DIR`），不进 DB。无 Redis、无 PostgreSQL、无 webhook、无 `GET /jobs` 列表、无 API key。
 
-`job_id` 为 `str(uuid.uuid4())`。
+进程重启后：库中的 job 行仍在，`GET /jobs/{id}` 可读到最后一次写入的状态。启动时会把中断的 `running` item 重置为 `pending`，并把未完成 job 重新入队。Compose 挂载 `./data:/app/data`，库文件与会话目录都落在该卷上。
+
+`job_id` 为 `str(uuid.uuid4())`。可选头 `X-Arachne-Client` → `client_id`（缺省 `"default"`），写入 job 行。
 
 **创建 `POST /jobs` → HTTP 202**
 
@@ -303,7 +307,18 @@ Item 状态：`pending` | `running` | `succeeded` | `failed` | `cancelled`。
 
 - 成功 item：`result` 为完整 `ExtractResponse`
 - 失败 item：`result` 为与同步 API 相同的 `{ "error": { "code", "message", "detail" } }` 信封（例如 `bad_url` / `rate_limited` / `profile_invalid`）。单条失败**不**把 job 标为失败：其余跑完后 job 仍为 `completed`
-- 未知或已过期/驱逐的 id → `job_not_found`（HTTP 404）
+- 未知 id、或 `client_id` 不匹配 → `job_not_found`（HTTP 404）
+
+**搜索 `GET /jobs/search?url=&limit=`**
+
+- `url` 必填：与 item 的 `requested_url` **或** 成功结果的最终 `url` **精确相等**
+- 只返回同一 `client_id` 的 jobs；默认 `limit=20`，最大 100
+- 按 `created_at` 降序
+
+**删除 `DELETE /jobs/{id}`**
+
+- 仅同一 `client_id`；成功 HTTP 204
+- 不匹配或未知 → `job_not_found`（404）
 
 **取消 `POST /jobs/{id}/cancel`**
 
@@ -311,7 +326,12 @@ Item 状态：`pending` | `running` | `succeeded` | `failed` | `cancelled`。
 - 已 `running` 的 item 跑完并记录 succeeded/failed
 - 出现取消后 job 终态为 `cancelled`
 - 已是 `completed` / `cancelled` → 幂等 200，原终态不变
-- 未知 id → `job_not_found`（404）
+- 未知 id 或 client 不匹配 → `job_not_found`（404）
+
+**保留 `ARACHNE_JOB_DB_TTL_SECONDS`**
+
+- `0`（默认）：completed / cancelled 永久保留
+- `>0`：删除 `updated_at` 早于 TTL 的已终态 job（访问时清理 + 简单周期任务）
 
 **执行**
 
@@ -357,18 +377,20 @@ Agent → FastAPI /extract
 
 `/health` 与 `/stats` 不经过 QPS 与抽取信号量。`POST /jobs` 创建本身也不经过 QPS；job item 调用 `run_extract` 时才计入。
 
-### 4.1.1 P4 批量流水线
+### 4.1.1 P4/P5 批量流水线（进程内 worker + SQLite）
 
 ```
-Agent → POST /jobs（校验条数、写入内存 store、入队）→ 202 {job_id, queued, total}
+Agent → POST /jobs（校验条数、写入 SQLite、入队）→ 202 {job_id, queued, total}
           → 单 consumer 出队
-          → job status=running
+          → job status=running（await 写库）
           → 每条 item：job Semaphore(ARACHNE_JOB_CONCURRENCY)
                → run_extract（QPS + cache + 抽取 Semaphore + profiles）
-               → succeeded: ExtractResponse
-                 failed: {error:{code,message,detail}}
+               → succeeded: ExtractResponse（await 写库，索引 result url）
+                 failed: {error:{code,message,detail}}（await 写库）
           → 全部终态 → completed；若曾 cancel → cancelled
-Agent → GET /jobs/{id} 轮询
+Agent → GET /jobs/{id} 从 DB 轮询（X-Arachne-Client）
+Agent → GET /jobs/search?url= 精确匹配 requested_url 或最终 url
+Agent → DELETE /jobs/{id}（同一 client）
 Agent → POST /jobs/{id}/cancel（pending 取消；running 收尾）
 ```
 
@@ -376,9 +398,10 @@ Agent → POST /jobs/{id}/cancel（pending 取消；running 收尾）
 
 ```
 app/
-  main.py            # 路由、lifespan（启动/停止 job worker）、错误映射
+  main.py            # 路由、lifespan（DB create_all、启动/停止 job worker）、错误映射
+  db.py              # SQLAlchemy async engine / session / create_all
   models.py          # Pydantic 请求/响应/Error/Stats
-  config.py          # 超时、UA、体积、并发、QPS、缓存、会话、重试、渲染超时、profiles、jobs
+  config.py          # 超时、UA、体积、并发、QPS、缓存、会话、重试、渲染超时、profiles、jobs、DATABASE_URL
   errors.py          # ArachneError 与 HTTP 映射
   ssrf.py            # getaddrinfo + 非公网地址拒绝
   fetch.py           # httpx 异步拉取（可选 headers/cookies）
@@ -388,22 +411,15 @@ app/
   limits.py          # 固定窗口 QPS、信号量、Stats
   logging_setup.py   # 结构化日志（无密钥）
   service.py         # QPS → cache → fetch/render/extract → 截断
-  sessions.py        # Fernet 会话读写与合并
+  sessions.py        # Fernet 会话读写与合并（仍为文件，不进 DB）
   antibot.py         # 重试、UA 池、挑战标记
   render.py          # 可选 Playwright（动态 import）
   profiles/          # P3 站点规则：schema / loader / apply
-  jobs/              # P4：models / store / worker / router
+  jobs/              # models / tables / store（SQLite） / worker / router
 scripts/
   write_session.py   # 离线写入 {id}.bin
 profiles/
   examples/          # 文档样例；不是默认 ARACHNE_PROFILES_DIR
-```
-
-后续扩展（不堵死）：
-
-```
-app/
-  store/          # 结果与任务持久化（P5）
 ```
 
 ### 4.3 技术选型
@@ -416,6 +432,7 @@ app/
 | 缓存 | cachetools.TTLCache | 进程内短 TTL；`requirements.txt` 用 `==` 钉死 |
 | 会话加密 | cryptography Fernet | 对称加密会话文件；密钥仅环境变量 |
 | 渲染 | 可选 Playwright | 独立 `requirements-playwright.txt`；默认镜像无浏览器 |
+| 任务存储 | SQLAlchemy 2.x async + aiosqlite | SQLite 文件；`==` 钉死；启动 `create_all`，破坏性变更再上 Alembic |
 
 依赖保持薄；每加一个库要能说明它服务哪条流水线步骤。
 
@@ -436,7 +453,9 @@ app/
 - 站点规则：`ARACHNE_PROFILES_DIR`（默认 `./data/profiles`，可为空）；热加载 debounce 1s
 - 重试：`ARACHNE_MAX_RETRIES=2`，`ARACHNE_RETRY_BACKOFF_SECONDS=0.5,1`
 - 渲染超时：`ARACHNE_RENDER_TIMEOUT=15`
-- 批量 jobs：`ARACHNE_JOB_MAX_URLS=50`、`ARACHNE_JOB_CONCURRENCY=3`、`ARACHNE_JOB_TTL_SECONDS=3600`、`ARACHNE_JOB_MAX_STORED=100`（内存 TTLCache；重启清空）
+- 批量 jobs：`ARACHNE_JOB_MAX_URLS=50`、`ARACHNE_JOB_CONCURRENCY=3`
+- 任务库：`ARACHNE_DATABASE_URL` 默认 `sqlite+aiosqlite:///./data/arachne.db`；`ARACHNE_JOB_DB_TTL_SECONDS=0`（0=永久保留终态 job）
+- Docker volume：`./data:/app/data`（库文件 + 会话目录 + profiles）
 
 ### 4.5 SSRF（P0，仍有效）
 
@@ -494,15 +513,20 @@ app/
 - [x] 进程内 `asyncio.Queue` + 单 consumer；每 job `ARACHNE_JOB_CONCURRENCY`（默认 3）；每条 item 复用 `run_extract`
 - [x] 创建不消耗全局 QPS；item 抽取消耗（现有 limiter + semaphore）
 - [x] `POST /jobs/{id}/cancel`：pending→cancelled；running 收尾；终态幂等 200
-- [x] 内存 TTL / max stored；未知或过期 id → `job_not_found`（404）
+- [x] 内存 TTL 已由 P5 SQLite 取代；未知 id / client 不匹配 → `job_not_found`（404）
 - [x] 轮询约定；**无** list API、**无** webhook；单条失败 job 仍 `completed`
-- [x] **不做**：Redis/DB 持久化（P5）、跨进程队列、回调推送
+- [x] **P5 已落地**：SQLite 持久化；会话仍不进 DB；无 Redis / 跨进程队列 / 回调推送
 
-### P5 — 持久化存储
+### P5 — 持久化存储（已实现）
 
-- [ ] 任务与抽取结果存储（PostgreSQL 或同等）
-- [ ] 会话材料加密存放；保留期限与清理策略
-- [ ] 按 `job_id` / URL / Agent 租户查询 API
+- [x] 任务与抽取结果存 SQLite（SQLAlchemy 2.x async + aiosqlite）；DB 为 jobs 唯一真源；每次状态变更同步 await 写
+- [x] 启动 `create_all`（无 Alembic）；破坏性 schema 变更时再引入 Alembic
+- [x] `ARACHNE_DATABASE_URL` 默认 `sqlite+aiosqlite:///./data/arachne.db`；确保 data 目录存在；Compose `./data:/app/data`
+- [x] 可选 `X-Arachne-Client` → `client_id`（默认 `"default"`）；GET / DELETE / search / cancel 按 client 隔离，不匹配 → `job_not_found`
+- [x] `GET /jobs/search?url=&limit=`：item `requested_url` 或结果最终 `url` 精确匹配
+- [x] `DELETE /jobs/{id}`；`ARACHNE_JOB_DB_TTL_SECONDS=0` 永久保留，`>0` 清理过期终态 job
+- [x] 会话材料仍为 Fernet 文件，**不**迁入 DB
+- [x] **不做**：PostgreSQL、Redis、API keys、webhooks
 
 ## 6. 路线图总览
 
@@ -523,27 +547,29 @@ flowchart LR
 | 登录态 / Cookie 抓取 | P1 注入 + P2 会话文件 | 调用方授权后注入或引用加密文件；非服务端代登破解 |
 | 反爬对抗 | P2 | 韧性与可观测，非攻击工具 |
 | 站点专用规则库 | P3 | 本地 JSON；非 DB |
-| 批量队列 | P4 | 进程内队列 + 轮询；重启丢失 |
-| 持久化存储 | P5 | |
+| 批量队列 | P4 | 进程内队列 + 轮询 |
+| 持久化存储 | P5 | SQLite jobs；会话仍为文件 |
 | 「认证绕过」 | **不实现攻击型绕过** | 以受控会话 + 明确错误码替代 |
 
 ## 7. 与当前仓库状态
 
-- P4 已实现：同步 `/extract` 之外提供批量 `/jobs`；POST extract 可带会话注入、`session_id`、`ua_strategy`、`render`、`site_profile`
-- jobs 为进程内内存；重启、TTL 到期或超过 `ARACHNE_JOB_MAX_STORED` 后 id 变为 `job_not_found`
-- 运行时依赖钉死在 `requirements.txt`（`==`，含 `cachetools`、`cryptography`、`cssselect`）；Playwright 见 `requirements-playwright.txt`
+- P5 已实现：同步 `/extract` 与批量 `/jobs`；jobs 落 SQLite，重启后 `GET /jobs/{id}` 仍可读；启动会重入未完成 job
+- 会话仍为 Fernet 文件；**无** PostgreSQL / Redis / webhook / API key
+- 运行时依赖钉死在 `requirements.txt`（`==`，含 `cachetools`、`cryptography`、`cssselect`、`sqlalchemy`、`aiosqlite`）；Playwright 见 `requirements-playwright.txt`
 - 单元测试默认不访问网络、不需要浏览器；活测：`ARACHNE_INTEGRATION=1 pytest -m integration`
 
-## 8. 验收（P4）
+## 8. 验收（P5）
 
-1. `uvicorn app.main:app` 可在**未安装 Playwright** 时启动；OpenAPI version `0.5.0`  
-2. `POST /jobs` 返回 202 `{job_id, status: queued, total}`；`GET /jobs/{id}` 最终 `completed` 且成功 item 含完整 ExtractResponse  
+1. `uvicorn app.main:app` 可在**未安装 Playwright** 时启动；OpenAPI version `0.6.0`  
+2. `POST /jobs` 返回 202 `{job_id, status: queued, total}`；`GET /jobs/{id}` 从 DB 读，最终 `completed` 且成功 item 含完整 ExtractResponse  
 3. 部分 item 失败（如 `bad_url`）时 job 仍为 `completed`，失败 item 的 `result` 为 `{error:{code,message,detail}}`  
 4. `POST /jobs/{id}/cancel` 将 pending 标为 cancelled；running 收尾；对已终态 job 幂等 200  
-5. 未知 / 过期 id → `job_not_found`（404）；`items` 超过 `ARACHNE_JOB_MAX_URLS` → `bad_url`（400）  
+5. 未知 id / 错误 `X-Arachne-Client` → `job_not_found`（404）；`items` 超过 `ARACHNE_JOB_MAX_URLS` → `bad_url`（400）  
 6. 打满同步 QPS 后 `POST /jobs` 仍为 202（创建不消耗 QPS）；item 执行走现有 limiter  
-7. README 含 jobs 契约、轮询示例、重启丢失说明  
-8. `pytest -m "not integration"` 通过（mock；不要求本机有浏览器）
+7. `GET /jobs/search?url=` 按 requested_url 或最终 url 精确匹配且按 client 过滤；`DELETE /jobs/{id}` 204  
+8. 同一 sqlite 文件上 create 后再 open 新 engine，`GET` 仍能读到 job  
+9. README 含 DB URL、volume、search、delete、client 头、重启仍可读  
+10. `pytest -m "not integration"` 通过（mock；不要求本机有浏览器）
 
 ---
 

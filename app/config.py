@@ -61,5 +61,6 @@ RENDER_TIMEOUT = _env_float("ARACHNE_RENDER_TIMEOUT", 15.0)
 
 JOB_MAX_URLS = _env_int("ARACHNE_JOB_MAX_URLS", 50)
 JOB_CONCURRENCY = _env_int("ARACHNE_JOB_CONCURRENCY", 3)
-JOB_TTL_SECONDS = _env_int("ARACHNE_JOB_TTL_SECONDS", 3600)
-JOB_MAX_STORED = _env_int("ARACHNE_JOB_MAX_STORED", 100)
+# 0 = keep completed jobs forever; >0 deletes completed/cancelled rows older than TTL.
+JOB_DB_TTL_SECONDS = _env_int("ARACHNE_JOB_DB_TTL_SECONDS", 0)
+DATABASE_URL = os.environ.get("ARACHNE_DATABASE_URL", "sqlite+aiosqlite:///./data/arachne.db")
