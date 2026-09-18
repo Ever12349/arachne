@@ -132,5 +132,7 @@ async def fetch_url(
         raise timeout_error() from exc
     except httpx.TooManyRedirects as exc:
         raise fetch_failed("Too many redirects", {"max_redirects": MAX_REDIRECTS}) from exc
+    except httpx.ConnectError as exc:
+        raise fetch_failed("Failed to fetch URL", {"reason": str(exc), "kind": "connect"}) from exc
     except httpx.HTTPError as exc:
         raise fetch_failed("Failed to fetch URL", {"reason": str(exc)}) from exc

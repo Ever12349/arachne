@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+UAStrategy = Literal["default", "rotate"]
 
 
 class ExtractRequest(BaseModel):
@@ -20,6 +22,18 @@ class ExtractRequest(BaseModel):
     max_chars: int | None = Field(
         default=None,
         description="Optional main_text cap; clamped to [1, MAIN_TEXT_MAX_CHARS]",
+    )
+    session_id: str | None = Field(
+        default=None,
+        description="Optional encrypted session id loaded from ARACHNE_SESSIONS_DIR (POST only)",
+    )
+    ua_strategy: UAStrategy = Field(
+        default="default",
+        description="User-Agent strategy (POST only): default | rotate",
+    )
+    render: bool = Field(
+        default=False,
+        description="If true, fetch via headless Playwright (POST only; optional extra install)",
     )
 
 

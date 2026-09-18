@@ -13,15 +13,23 @@ UNAUTHORIZED_UPSTREAM = "unauthorized_upstream"
 EXTRACT_EMPTY = "extract_empty"
 RATE_LIMITED = "rate_limited"
 INTERNAL = "internal"
+SESSION_INVALID = "session_invalid"
+CHALLENGE_DETECTED = "challenge_detected"
+RENDER_UNAVAILABLE = "render_unavailable"
+RENDER_FAILED = "render_failed"
 
 HTTP_STATUS: dict[str, int] = {
     BAD_URL: 400,
+    SESSION_INVALID: 400,
+    CHALLENGE_DETECTED: 403,
     UNSUPPORTED_CONTENT: 422,
     EXTRACT_EMPTY: 422,
     TOO_LARGE: 422,
     TIMEOUT: 504,
     FETCH_FAILED: 502,
     UNAUTHORIZED_UPSTREAM: 502,
+    RENDER_FAILED: 502,
+    RENDER_UNAVAILABLE: 501,
     RATE_LIMITED: 429,
     INTERNAL: 500,
 }
@@ -71,3 +79,19 @@ def extract_empty(message: str = "Could not extract title or main text", detail:
 
 def rate_limited(message: str = "Rate limit exceeded", detail: dict[str, Any] | None = None) -> ArachneError:
     return ArachneError(RATE_LIMITED, message, detail)
+
+
+def session_invalid(message: str = "Invalid session", detail: dict[str, Any] | None = None) -> ArachneError:
+    return ArachneError(SESSION_INVALID, message, detail)
+
+
+def challenge_detected(message: str = "Upstream returned a bot challenge page", detail: dict[str, Any] | None = None) -> ArachneError:
+    return ArachneError(CHALLENGE_DETECTED, message, detail)
+
+
+def render_unavailable(message: str = "Playwright is not installed", detail: dict[str, Any] | None = None) -> ArachneError:
+    return ArachneError(RENDER_UNAVAILABLE, message, detail)
+
+
+def render_failed(message: str = "Browser render failed", detail: dict[str, Any] | None = None) -> ArachneError:
+    return ArachneError(RENDER_FAILED, message, detail)
