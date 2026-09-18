@@ -54,6 +54,19 @@ SESSION_KEY = os.environ.get("ARACHNE_SESSION_KEY", "")
 PROFILES_DIR = os.environ.get("ARACHNE_PROFILES_DIR", "./data/profiles")
 PROFILE_RELOAD_DEBOUNCE_SECONDS = 1.0
 
+# OpenAI-compatible chat for POST /profiles/suggest strategy=llm|auto.
+# BASE_URL should include the API root (typically …/v1); we append /chat/completions.
+LLM_BASE_URL = os.environ.get("ARACHNE_LLM_BASE_URL", "https://api.openai.com/v1")
+LLM_API_KEY = os.environ.get("ARACHNE_LLM_API_KEY", "")
+LLM_MODEL = os.environ.get("ARACHNE_LLM_MODEL", "gpt-4o-mini")
+LLM_TIMEOUT = _env_float("ARACHNE_LLM_TIMEOUT", 30.0)
+
+SUGGEST_MIN_TITLE_CHARS = _env_int("ARACHNE_SUGGEST_MIN_TITLE_CHARS", 2)
+SUGGEST_MIN_MAIN_CHARS = _env_int("ARACHNE_SUGGEST_MIN_MAIN_CHARS", 80)
+SUGGEST_SKELETON_MAX_NODES = _env_int("ARACHNE_SUGGEST_SKELETON_MAX_NODES", 200)
+SUGGEST_SKELETON_MAX_CHARS = _env_int("ARACHNE_SUGGEST_SKELETON_MAX_CHARS", 30_000)
+SUGGEST_OVERLAP_RATIO = _env_float("ARACHNE_SUGGEST_OVERLAP_RATIO", 0.6)
+
 MAX_RETRIES = _env_int("ARACHNE_MAX_RETRIES", 2)
 RETRY_BACKOFF_SECONDS = _env_floats("ARACHNE_RETRY_BACKOFF_SECONDS", [0.5, 1.0])
 

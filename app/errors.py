@@ -19,6 +19,9 @@ CHALLENGE_DETECTED = "challenge_detected"
 RENDER_UNAVAILABLE = "render_unavailable"
 RENDER_FAILED = "render_failed"
 JOB_NOT_FOUND = "job_not_found"
+LLM_UNAVAILABLE = "llm_unavailable"
+LLM_FAILED = "llm_failed"
+PROFILE_EXISTS = "profile_exists"
 
 HTTP_STATUS: dict[str, int] = {
     BAD_URL: 400,
@@ -32,10 +35,13 @@ HTTP_STATUS: dict[str, int] = {
     FETCH_FAILED: 502,
     UNAUTHORIZED_UPSTREAM: 502,
     RENDER_FAILED: 502,
+    LLM_FAILED: 502,
     RENDER_UNAVAILABLE: 501,
+    LLM_UNAVAILABLE: 501,
     RATE_LIMITED: 429,
     INTERNAL: 500,
     JOB_NOT_FOUND: 404,
+    PROFILE_EXISTS: 409,
 }
 
 
@@ -107,3 +113,15 @@ def render_failed(message: str = "Browser render failed", detail: dict[str, Any]
 
 def job_not_found(message: str = "Job not found", detail: dict[str, Any] | None = None) -> ArachneError:
     return ArachneError(JOB_NOT_FOUND, message, detail)
+
+
+def llm_unavailable(message: str = "LLM is not configured", detail: dict[str, Any] | None = None) -> ArachneError:
+    return ArachneError(LLM_UNAVAILABLE, message, detail)
+
+
+def llm_failed(message: str = "LLM profile suggestion failed", detail: dict[str, Any] | None = None) -> ArachneError:
+    return ArachneError(LLM_FAILED, message, detail)
+
+
+def profile_exists(message: str = "Profile already exists", detail: dict[str, Any] | None = None) -> ArachneError:
+    return ArachneError(PROFILE_EXISTS, message, detail)

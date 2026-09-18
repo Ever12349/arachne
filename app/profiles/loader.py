@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -13,7 +15,7 @@ from urllib.parse import urlparse
 from pydantic import ValidationError
 
 from app import config
-from app.errors import profile_invalid
+from app.errors import profile_exists, profile_invalid
 from app.profiles.schema import PROFILE_ID_RE, SiteProfile
 from app.ssrf import normalize_host
 
@@ -166,6 +168,30 @@ class ProfileRegistry:
 
     def match_url(self, url: str) -> SiteProfile | None:
         return self.match_host(urlparse(url).hostname)
+
+    def save_profile(self, profile: SiteProfile, *, overwrite: bool = False) -> SiteProfile:
+        """Write `{id}.json` under this registry's directory and force a reload."""
+        if not PROFILE_ID_RE.fullmatch(profile.id):
+            raise profile_invalid(_GENERIC_INVALID, {"id": profile.id})
+        self._dir.mkdir(parents=True, exist_ok=True)
+        path = self._dir / f"{profile.id}.json"
+        if path.exists() and not overwrite:
+            raise profile_exists("Profile already exists", {"id": profile.id})
+        payload = profile.model_dump(mode="json")
+        text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{profile.id}.", suffix=".tmp", dir=self._dir)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            os.replace(tmp_name, path)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+        self.maybe_reload(force=True)
+        return profile
 
 
 def resolve_profile(
