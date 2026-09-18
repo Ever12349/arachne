@@ -15,6 +15,8 @@ from app.main import app
 FIXTURES = Path(__file__).parent / "fixtures"
 SAMPLE_HTML = (FIXTURES / "sample.html").read_text(encoding="utf-8")
 EMPTY_HTML = (FIXTURES / "empty.html").read_text(encoding="utf-8")
+CHALLENGE_CF_HTML = (FIXTURES / "challenge_cf.html").read_text(encoding="utf-8")
+CHALLENGE_ATTENTION_HTML = (FIXTURES / "challenge_attention.html").read_text(encoding="utf-8")
 
 PUBLIC_IP = "93.184.216.34"
 
@@ -79,3 +81,13 @@ def api_client(public_dns, monkeypatch: pytest.MonkeyPatch):
 def set_high_qps(client: TestClient, qps: int = 10_000) -> None:
     """Replace the process limiter so a test can issue many extract calls."""
     client.app.state.rate_limiter = FixedWindowRateLimiter(qps=qps)
+
+
+@pytest.fixture(autouse=True)
+def _fast_retry_backoff(monkeypatch: pytest.MonkeyPatch):
+    """Unit tests should not wait on real retry sleeps."""
+
+    async def instant(_delay: float = 0) -> None:
+        return None
+
+    monkeypatch.setattr("app.antibot.asyncio.sleep", instant)

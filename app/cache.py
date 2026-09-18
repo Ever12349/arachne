@@ -43,8 +43,25 @@ def session_fingerprint(headers: dict[str, str], cookies: dict[str, str]) -> str
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def cache_key(url: str, headers: dict[str, str], cookies: dict[str, str]) -> tuple[str, str]:
-    return (normalize_cache_url(url), session_fingerprint(headers, cookies))
+CacheKey = tuple[str, str, str, str]
+
+
+def cache_key(
+    url: str,
+    headers: dict[str, str],
+    cookies: dict[str, str],
+    *,
+    render: bool = False,
+    ua_strategy: str = "default",
+) -> CacheKey:
+    """Key is normalized URL + merged session fingerprint + render flag + ua_strategy."""
+    strategy = ua_strategy or "default"
+    return (
+        normalize_cache_url(url),
+        session_fingerprint(headers, cookies),
+        "1" if render else "0",
+        strategy,
+    )
 
 
 class ResultCache:
@@ -62,14 +79,14 @@ class ResultCache:
             self._cache = TTLCache(maxsize=maxsize, ttl=ttl, timer=timer)
         self._lock = asyncio.Lock()
 
-    async def get(self, key: tuple[str, str]) -> ExtractResponse | None:
+    async def get(self, key: CacheKey | tuple[str, ...]) -> ExtractResponse | None:
         async with self._lock:
             value = self._cache.get(key)
             if value is None:
                 return None
             return value.model_copy(deep=True)
 
-    async def set(self, key: tuple[str, str], value: ExtractResponse) -> None:
+    async def set(self, key: CacheKey | tuple[str, ...], value: ExtractResponse) -> None:
         async with self._lock:
             self._cache[key] = value.model_copy(deep=True)
 

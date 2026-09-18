@@ -1,0 +1,4 @@
+# Optional browser render path. The default requirements.txt stays browser-free.
+# Install: pip install -r requirements.txt -r requirements-playwright.txt
+#          playwright install chromium
+playwright==1.55.0

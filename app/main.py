@@ -1,4 +1,4 @@
-"""Arachne P1: synchronous URL → structured JSON extract for AI agents."""
+"""Arachne P2: synchronous URL → structured JSON extract for AI agents."""
 
 from __future__ import annotations
 
@@ -25,11 +25,13 @@ setup_logging()
 logger = logging.getLogger("arachne")
 
 ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
-    400: {"model": ErrorResponse, "description": "bad_url"},
+    400: {"model": ErrorResponse, "description": "bad_url | session_invalid"},
+    403: {"model": ErrorResponse, "description": "challenge_detected"},
     422: {"model": ErrorResponse, "description": "unsupported_content | extract_empty | too_large"},
     429: {"model": ErrorResponse, "description": "rate_limited"},
     500: {"model": ErrorResponse, "description": "internal"},
-    502: {"model": ErrorResponse, "description": "fetch_failed | unauthorized_upstream"},
+    501: {"model": ErrorResponse, "description": "render_unavailable"},
+    502: {"model": ErrorResponse, "description": "fetch_failed | unauthorized_upstream | render_failed"},
     504: {"model": ErrorResponse, "description": "timeout"},
 }
 
@@ -47,7 +49,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="arachne",
-    version="0.2.0",
+    version="0.3.0",
     description="Synchronous URL → structured JSON extract for AI agents.",
     lifespan=lifespan,
 )
@@ -103,6 +105,9 @@ async def _run_extract(
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     max_chars: int | None = None,
+    session_id: str | None = None,
+    ua_strategy: str = "default",
+    render: bool = False,
 ) -> ExtractResponse:
     state = request.app.state
     return await run_extract(
@@ -111,6 +116,9 @@ async def _run_extract(
         headers=headers,
         cookies=cookies,
         max_chars=max_chars,
+        session_id=session_id,
+        ua_strategy=ua_strategy,
+        render=render,
         cache=state.extract_cache,
         limiter=state.rate_limiter,
         semaphore=state.extract_semaphore,
@@ -144,4 +152,7 @@ async def extract_post(
         headers=body.headers,
         cookies=body.cookies,
         max_chars=body.max_chars,
+        session_id=body.session_id,
+        ua_strategy=body.ua_strategy,
+        render=body.render,
     )

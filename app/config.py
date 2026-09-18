@@ -25,7 +25,32 @@ def _env_int(name: str, default: int) -> int:
     return int(raw)
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    return float(raw)
+
+
+def _env_floats(name: str, default: list[float]) -> list[float]:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return list(default)
+    parts = [p.strip() for p in str(raw).split(",") if p.strip()]
+    if not parts:
+        return list(default)
+    return [float(p) for p in parts]
+
+
 MAX_CONCURRENCY = _env_int("ARACHNE_MAX_CONCURRENCY", 10)
 QPS = _env_int("ARACHNE_QPS", 5)
 CACHE_TTL_SECONDS = _env_int("ARACHNE_CACHE_TTL_SECONDS", 60)
 CACHE_MAXSIZE = _env_int("ARACHNE_CACHE_MAXSIZE", 256)
+
+SESSIONS_DIR = os.environ.get("ARACHNE_SESSIONS_DIR", "./data/sessions")
+SESSION_KEY = os.environ.get("ARACHNE_SESSION_KEY", "")
+
+MAX_RETRIES = _env_int("ARACHNE_MAX_RETRIES", 2)
+RETRY_BACKOFF_SECONDS = _env_floats("ARACHNE_RETRY_BACKOFF_SECONDS", [0.5, 1.0])
+
+RENDER_TIMEOUT = _env_float("ARACHNE_RENDER_TIMEOUT", 15.0)

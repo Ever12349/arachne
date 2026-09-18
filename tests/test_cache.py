@@ -43,6 +43,10 @@ def test_cache_key_includes_url_and_session():
     assert k1 == k2
     k3 = cache_key("https://example.com/a", {}, {"sid": "1"})
     assert k1 != k3
+    assert k1[2] == "0"
+    assert k1[3] == "default"
+    assert cache_key("https://example.com/a", {}, {}, render=True) != k1
+    assert cache_key("https://example.com/a", {}, {}, ua_strategy="rotate") != k1
 
 
 class _Clock:

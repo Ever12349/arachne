@@ -13,3 +13,5 @@ env/
 dist/
 build/
 .DS_Store
+data/sessions/*.bin
+data/sessions/*.json
