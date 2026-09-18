@@ -1,45 +1,106 @@
-"""Arachne FastAPI stub — placeholder extract contract only (no crawl/fetch)."""
+"""Arachne P0: synchronous URL → structured JSON extract."""
 
 from __future__ import annotations
 
-from fastapi import FastAPI, Query
-from pydantic import BaseModel, Field
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
-app = FastAPI(title="arachne", version="0.0.1")
+import httpx
+from fastapi import Depends, FastAPI, Query, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+from app.errors import ArachneError, http_status_for
+from app.fetch import create_http_client
+from app.models import ErrorResponse, ExtractRequest, ExtractResponse
+from app.service import extract_page
+
+logger = logging.getLogger("arachne")
+
+ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
+    400: {"model": ErrorResponse, "description": "bad_url"},
+    422: {"model": ErrorResponse, "description": "unsupported_content | extract_empty | too_large"},
+    500: {"model": ErrorResponse, "description": "internal"},
+    502: {"model": ErrorResponse, "description": "fetch_failed | unauthorized_upstream"},
+    504: {"model": ErrorResponse, "description": "timeout"},
+}
 
 
-class ExtractRequest(BaseModel):
-    url: str = Field(..., description="Page URL to extract (stub: not fetched)")
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    async with create_http_client() as client:
+        app.state.http_client = client
+        yield
 
 
-class ExtractResponse(BaseModel):
-    url: str
-    title: str
-    main_text: str
-    metadata: dict
-    links: list[str]
+app = FastAPI(
+    title="arachne",
+    version="0.1.0",
+    description="Synchronous URL → structured JSON extract for AI agents.",
+    lifespan=lifespan,
+)
 
 
-def _placeholder(url: str) -> ExtractResponse:
-    return ExtractResponse(
-        url=url,
-        title="",
-        main_text="",
-        metadata={},
-        links=[],
+def get_http_client(request: Request) -> httpx.AsyncClient:
+    return request.app.state.http_client
+
+
+@app.exception_handler(ArachneError)
+async def arachne_error_handler(_request: Request, exc: ArachneError) -> JSONResponse:
+    return JSONResponse(
+        status_code=http_status_for(exc.code),
+        content={
+            "error": {
+                "code": exc.code,
+                "message": exc.message,
+                "detail": exc.detail,
+            }
+        },
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": {
+                "code": "bad_url",
+                "message": "Invalid request",
+                "detail": {"errors": jsonable_encoder(exc.errors())},
+            }
+        },
     )
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
+async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/extract", response_model=ExtractResponse)
-def extract_get(url: str = Query(..., description="Page URL (stub: not fetched)")) -> ExtractResponse:
-    return _placeholder(url)
+async def _run_extract(url: str, client: httpx.AsyncClient) -> ExtractResponse:
+    try:
+        return await extract_page(url, client)
+    except ArachneError:
+        raise
+    except Exception:
+        logger.exception("unhandled extract error")
+        raise ArachneError("internal", "Internal server error") from None
 
 
-@app.post("/extract", response_model=ExtractResponse)
-def extract_post(body: ExtractRequest) -> ExtractResponse:
-    return _placeholder(body.url)
+@app.get("/extract", response_model=ExtractResponse, responses=ERROR_RESPONSES)
+async def extract_get(
+    url: str = Query(..., description="http(s) page URL to fetch and extract"),
+    client: httpx.AsyncClient = Depends(get_http_client),
+) -> ExtractResponse:
+    return await _run_extract(url, client)
+
+
+@app.post("/extract", response_model=ExtractResponse, responses=ERROR_RESPONSES)
+async def extract_post(
+    body: ExtractRequest,
+    client: httpx.AsyncClient = Depends(get_http_client),
+) -> ExtractResponse:
+    return await _run_extract(body.url, client)

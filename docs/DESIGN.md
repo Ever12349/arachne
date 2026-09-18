@@ -2,7 +2,7 @@
 
 > 版本：v0.1 · 受众：维护者与调用方（AI Agent 系统）  
 > 仓库：https://github.com/Ever12349/arachne  
-> 本地：`/Users/qianxiao/worker/AIAgent/arachne`
+> 状态：P0 同步抽取已落地（FastAPI + httpx + trafilatura；无 Cookie / Playwright / 队列 / DB）
 
 ## 1. 定位
 
@@ -53,7 +53,7 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 
 ### 3.2 成功响应（P0 定稿）
 
-`links` 使用对象列表（对 Agent 更友好，可区分锚文本与 URL）：
+`links` 使用对象列表（对 Agent 更友好，可区分锚文本与 URL）。`url` 为重定向后的最终地址；`requested_url` 为调用方原始 URL。metadata 字符串字段缺省为 `""`。
 
 ```json
 {
@@ -78,10 +78,7 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 }
 ```
 
-相对当前 stub 的变更：
-
-- 增加 `requested_url`、`status_code`
-- `links`: `string[]` → `{href, text}[]`（实现业务前改 models）
+正文由 trafilatura 从已下载 HTML 抽取；若 `title` 与 `main_text` 均为空 → `extract_empty`。
 
 ### 3.3 错误响应（机读）
 
@@ -90,12 +87,24 @@ HTTP 状态与业务码分离；body 统一：
 ```json
 {
   "error": {
-    "code": "bad_url | fetch_failed | timeout | unsupported_content | too_large | rate_limited | unauthorized_upstream | internal",
+    "code": "bad_url | fetch_failed | timeout | unsupported_content | too_large | unauthorized_upstream | extract_empty | internal",
     "message": "人类可读短句",
     "detail": {}
   }
 }
 ```
+
+P0 错误码 → HTTP：
+
+| code | HTTP |
+|------|------|
+| `bad_url` | 400 |
+| `unsupported_content` / `extract_empty` / `too_large` | 422 |
+| `timeout` | 504 |
+| `fetch_failed` / `unauthorized_upstream` | 502 |
+| `internal` | 500 |
+
+`rate_limited` 不在 P0。上游 `status >= 400` **不抽取**：401/403 → `unauthorized_upstream`，其余 → `fetch_failed`；`detail` 含 `status_code`。
 
 Agent 应根据 `error.code` 分支（重试 / 换策略 / 向用户要 Cookie），而不是解析 `message` 字符串。
 
@@ -122,11 +131,14 @@ Agent → FastAPI /extract
 
 ```
 app/
-  main.py       # 路由、依赖注入、错误映射
+  main.py       # 路由、lifespan 共享 AsyncClient、错误映射
   models.py     # Pydantic 请求/响应/Error
-  config.py     # 超时、UA、体积上限、并发上限
+  config.py     # 超时、UA、体积上限、MAIN_TEXT_MAX_CHARS
+  errors.py     # ArachneError 与 HTTP 映射
+  ssrf.py       # getaddrinfo + 非公网地址拒绝
   fetch.py      # httpx 异步拉取
   extract.py    # HTML → title/main_text/metadata/links
+  service.py    # validate → fetch → extract
 ```
 
 后续扩展（不堵死）：
@@ -151,25 +163,36 @@ app/
 
 依赖保持薄；每加一个库要能说明它服务哪条流水线步骤。
 
-### 4.4 运行参数（建议默认）
+### 4.4 运行参数（P0 定稿）
 
 - 仅允许 `http` / `https`
-- 连接超时 5s，读超时 15s
-- 响应体上限约 2MB
-- 链接最多约 50（同域优先、去重、相对转绝对）
-- 固定且可配置的 User-Agent
+- `httpx.Timeout(connect=5, read=15, write=15, pool=5)`（httpx 要求四项都给；connect/read 为锁定值）
+- 响应体上限 2MB（`Content-Length` 超限或实际读取超限 → `too_large`）
+- `main_text` 硬上限 `MAIN_TEXT_MAX_CHARS=100_000`
+- 链接最多 50：全页 lxml 扫描 `<a>`（不用 trafilatura `include_links`）；绝对 URL；跳过 `javascript:` / `mailto:` / 空 href；同 host 优先（比较 host 时去掉前导 `www.`）
+- User-Agent 可配置（环境变量 `ARACHNE_USER_AGENT`）
+- 共享 `httpx.AsyncClient`（FastAPI lifespan）
 - 单进程并发上限（P1：信号量），防止 Agent 风暴打满出口
+
+### 4.5 SSRF（P0）
+
+流程：解析 URL → `getaddrinfo` → 若任一地址为 private / loopback / link-local / unspecified（含 IPv4-mapped IPv6）则 `bad_url` → **仍用原始 hostname 发请求**（不改连解析到的 IP，以免 TLS 证书与虚拟主机失败）。
+
+每次跳转前同样做该校验（httpx `request` hook）。
+
+**残留风险（DNS rebinding）**：校验与 TCP/TLS 连接之间，DNS 可能被换成内网地址。P0 接受该窗口并在此记录；按解析 IP 直连或连接后核对对端地址属于后续加固，不在 P0。
 
 ## 5. 实现分期（开发计划）
 
-### P0 — 可用同步抽取（当前下一步实现）
+### P0 — 可用同步抽取（已实现）
 
-- [ ] 落地 `models`（含 `links: [{href, text}]`）
-- [ ] `fetch`：httpx、超时、体积、Content-Type 检查
-- [ ] `extract`：title / main_text / metadata / links
-- [ ] 错误码与 OpenAPI 示例
-- [ ] 用公开样例 URL 实测；README 更新 curl 与 Agent 调用说明
-- [ ] **不含** Cookie、队列、DB、Playwright
+- [x] 落地 `models`（含 `links: [{href, text}]`）
+- [x] `fetch`：httpx、超时、体积、Content-Type 检查
+- [x] `extract`：trafilatura 抽 title / main_text；lxml 抽 links；metadata 含 description / language / content_type / og
+- [x] 错误码与 HTTP 映射（含 `extract_empty`；`rate_limited` 不在 P0）
+- [x] 用公开样例 URL 实测；README 更新 curl 与 Agent 调用说明
+- [x] 单元测试（mock）+ 可选 `@pytest.mark.integration` 活测
+- [x] **不含** Cookie、队列、DB、Playwright
 
 ### P1 — Agent 生产可用性
 
@@ -229,16 +252,17 @@ flowchart LR
 
 ## 7. 与当前仓库状态
 
-- 已有 FastAPI stub：`GET/POST /extract` 返回空字段占位
-- 业务逻辑未实现；以本文为实施依据
-- 实现 P0 前先改 `ExtractResponse.links` 为对象列表，并更新 README / OpenAPI
+- P0 已实现：`GET/POST /extract` 对公开 HTML URL 返回非空 `title` / `main_text`（受上游与抽取质量约束）
+- 运行时依赖钉死在 `requirements.txt`（`==`）；测试见 `requirements-dev.txt`
+- 单元测试默认不访问网络；活测：`ARACHNE_INTEGRATION=1 pytest -m integration`
 
 ## 8. 验收（P0）
 
 1. `uvicorn app.main:app` 可启动  
 2. 对公开 HTML 页请求 `/extract`，`title` 与 `main_text` 非空  
-3. 非法 URL / 超时 / 非 HTML 返回约定 `error.code`  
-4. README 含 Agent 侧最小调用示例（`curl` + 字段说明）
+3. 非法 URL / 超时 / 非 HTML / 空抽取 / 超体积 返回约定 `error.code`  
+4. README 含 Agent 侧最小调用示例（`curl` + 字段说明）  
+5. `pytest -m "not integration"` 通过
 
 ---
 
