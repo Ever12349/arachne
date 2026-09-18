@@ -9,6 +9,18 @@ from pydantic import BaseModel, Field
 
 class ExtractRequest(BaseModel):
     url: str = Field(..., description="http(s) URL to fetch and extract")
+    headers: dict[str, str] | None = Field(
+        default=None,
+        description="Optional request headers (allowlisted names only; POST only)",
+    )
+    cookies: dict[str, str] | None = Field(
+        default=None,
+        description="Optional cookies forwarded to the upstream request (POST only)",
+    )
+    max_chars: int | None = Field(
+        default=None,
+        description="Optional main_text cap; clamped to [1, MAIN_TEXT_MAX_CHARS]",
+    )
 
 
 class OgMetadata(BaseModel):
@@ -37,6 +49,7 @@ class ExtractResponse(BaseModel):
     main_text: str
     metadata: PageMetadata
     links: list[Link]
+    truncated: bool = False
 
 
 class ErrorBody(BaseModel):
@@ -47,3 +60,13 @@ class ErrorBody(BaseModel):
 
 class ErrorResponse(BaseModel):
     error: ErrorBody
+
+
+class StatsResponse(BaseModel):
+    requests_total: int
+    errors_by_code: dict[str, int]
+    cache_hits: int
+    cache_misses: int
+    in_flight: int
+    latency_ms_sum: float
+    latency_ms_count: int

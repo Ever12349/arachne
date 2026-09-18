@@ -2,7 +2,9 @@
 
 Synchronous **URL → structured JSON** extract service for AI agents.
 
-P0 fetches public HTML with `httpx` and extracts `title` / `main_text` / metadata / links. No cookies, Playwright, queue, or database.
+P1 fetches HTML with `httpx` and extracts `title` / `main_text` / metadata / links. POST `/extract` may inject caller `cookies` / allowlisted `headers`. In-process QPS, concurrency, and a 60s TTL cache are on. No Playwright, queue, Redis, or database.
+
+API contract version **0.2.0**.
 
 ## Install
 
@@ -24,10 +26,14 @@ pip install -r requirements-dev.txt
 uvicorn app.main:app --reload
 ```
 
-Optional User-Agent override:
+Optional settings (defaults shown):
 
 ```bash
 export ARACHNE_USER_AGENT="MyAgent/1.0"
+export ARACHNE_MAX_CONCURRENCY=10
+export ARACHNE_QPS=5
+export ARACHNE_CACHE_TTL_SECONDS=60
+export ARACHNE_CACHE_MAXSIZE=256
 uvicorn app.main:app
 ```
 
@@ -85,20 +91,34 @@ Same `PYTHON_IMAGE` override for a plain `docker build`:
 docker build --build-arg PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.12-slim -t arachne .
 ```
 
-Pass `ARACHNE_USER_AGENT` the same way as a local run (`-e` on `docker run`, or `environment:` in Compose). Do not bake credentials into the image.
+Pass `ARACHNE_USER_AGENT` and the other `ARACHNE_*` settings the same way as a local run (`-e` on `docker run`, or `environment:` in Compose). Do not bake credentials into the image.
 
 ## Extract
 
-`GET` or `POST /extract`. Prefer `POST` so later optional fields do not hit URL-length limits.
+`GET` or `POST /extract`. Prefer `POST` when sending cookies or headers.
+
+GET query: `url` (required), `max_chars` (optional). No cookies/headers.
+
+POST JSON: `url`, optional `headers` and `cookies` (`dict[str, str]` only), optional `max_chars`.
 
 ```bash
 curl 'http://127.0.0.1:8000/extract?url=https://example.com'
 ```
 
 ```bash
+curl 'http://127.0.0.1:8000/extract?url=https://example.com&max_chars=2000'
+```
+
+```bash
 curl -X POST http://127.0.0.1:8000/extract \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com"}'
+```
+
+```bash
+curl -X POST http://127.0.0.1:8000/extract \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com","cookies":{"session":"…"},"headers":{"Authorization":"Bearer …","User-Agent":"MyAgent/1.0"},"max_chars":4000}'
 ```
 
 Success (200):
@@ -122,13 +142,38 @@ Success (200):
   },
   "links": [
     {"href": "https://www.iana.org/domains/example", "text": "More information..."}
-  ]
+  ],
+  "truncated": false
 }
 ```
 
-`url` is the final URL after redirects. `requested_url` is what the caller sent. Metadata string fields default to `""`. `links` are absolute `http`/`https` anchors, same-host first (leading `www.` ignored), capped at 50. `main_text` is capped at 100_000 characters.
+`url` is the final URL after redirects. `requested_url` is what the caller sent. Metadata string fields default to `""`. `links` are absolute `http`/`https` anchors, same-host first (leading `www.` ignored), capped at 50. Bare `#` fragments, `tel:`, `javascript:`, `mailto:`, and non-http(s) hrefs are skipped. Link text is capped at 200 characters.
+
+`main_text` is hard-capped at 100_000 characters. If you pass `max_chars`, it is clamped to `[1, 100000]` and `main_text` is cut to that length. `truncated` is `true` only when text was cut. There is no `cached` field on the success body; cache hits are counted in logs and `/stats` only.
+
+POST headers are allowlisted: `Authorization`, `Accept`, `Accept-Language`, `User-Agent`, `Referer`, `Cache-Control`. `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, and `Cookie` are stripped (`Cookie` only via the `cookies` field). A caller `User-Agent` overrides `ARACHNE_USER_AGENT`.
 
 Agent client timeout should be slightly above the server read timeout (15s); **≥ 20s** is a reasonable default.
+
+Global extract QPS is a fixed 1-second window of 5 (override with `ARACHNE_QPS`). Cache misses are also limited by `ARACHNE_MAX_CONCURRENCY` (default 10). `/health` and `/stats` are exempt.
+
+## Stats
+
+```bash
+curl http://127.0.0.1:8000/stats
+```
+
+```json
+{
+  "requests_total": 0,
+  "errors_by_code": {},
+  "cache_hits": 0,
+  "cache_misses": 0,
+  "in_flight": 0,
+  "latency_ms_sum": 0.0,
+  "latency_ms_count": 0
+}
+```
 
 ## Errors
 
@@ -150,11 +195,12 @@ Branch on `error.code`, not on `message`.
 |------|------|
 | `bad_url` | 400 |
 | `unsupported_content`, `extract_empty`, `too_large` | 422 |
+| `rate_limited` | 429 |
 | `timeout` | 504 |
 | `fetch_failed`, `unauthorized_upstream` | 502 |
 | `internal` | 500 |
 
-`rate_limited` is not implemented in P0. Upstream 401/403 become `unauthorized_upstream`; other `status >= 400` become `fetch_failed`. Both include `detail.status_code`. Only `http`/`https` URLs are accepted; private, loopback, link-local, and unspecified addresses are rejected as `bad_url`.
+Upstream 401/403 become `unauthorized_upstream`; other `status >= 400` become `fetch_failed`. Both include `detail.status_code`. Only `http`/`https` URLs are accepted; private, loopback, link-local, and unspecified addresses are rejected as `bad_url`. Cookie / Authorization values are never written to logs.
 
 ## Tests
 

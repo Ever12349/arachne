@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.fetch import ssrf_request_hook
+from app.limits import FixedWindowRateLimiter
 from app.main import app
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -73,3 +74,8 @@ def api_client(public_dns, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("app.main.create_http_client", fake_create)
     with TestClient(app) as client:
         yield client
+
+
+def set_high_qps(client: TestClient, qps: int = 10_000) -> None:
+    """Replace the process limiter so a test can issue many extract calls."""
+    client.app.state.rate_limiter = FixedWindowRateLimiter(qps=qps)

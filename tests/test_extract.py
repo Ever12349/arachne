@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from lxml import html as lxml_html
 
-from app.config import MAIN_TEXT_MAX_CHARS, MAX_LINKS
+from app.config import LINK_TEXT_MAX_CHARS, MAX_LINKS
 from app.errors import ArachneError
 from app.extract import collect_links, extract_html
 from tests.conftest import EMPTY_HTML, SAMPLE_HTML
@@ -38,6 +38,8 @@ def test_sample_html_extracts_title_text_metadata_and_links():
     assert texts["https://www.example.com/about"] == "About"
     assert "mailto:test@example.com" not in hrefs
     assert not any(h.startswith("javascript:") for h in hrefs)
+    assert not any(h.startswith("tel:") for h in hrefs)
+    assert "https://www.example.com/article#section" not in hrefs
     # same-host (www. stripped) before external
     other_index = hrefs.index("https://other.test/x")
     same_host_hrefs = [h for h in hrefs if "other.test" not in h]
@@ -54,13 +56,7 @@ def test_title_only_is_success():
     html = "<html><head><title>Only Title</title></head><body></body></html>"
     result = _extract(html)
     assert result.title == "Only Title"
-
-
-def test_main_text_hard_cap():
-    paragraph = "word " * 300
-    html = f"<html><head><title>Long</title></head><body><article><p>{paragraph * 200}</p></article></body></html>"
-    result = _extract(html)
-    assert len(result.main_text) <= MAIN_TEXT_MAX_CHARS
+    assert result.truncated is False
 
 
 def test_links_cap_and_same_host_priority():
@@ -78,3 +74,20 @@ def test_links_cap_and_same_host_priority():
     assert len(links) == MAX_LINKS
     assert all(link.href.startswith("https://example.com/") for link in links[:20])
     assert all(link.href.startswith("https://other.test/") for link in links[20:])
+
+
+def test_skips_fragment_tel_and_caps_link_text():
+    long_text = "L" * 500
+    html = (
+        "<html><head><title>Links</title></head><body><p>enough text here.</p>"
+        '<a href="#section">frag</a>'
+        '<a href="#">hash</a>'
+        '<a href="tel:+15551212">call</a>'
+        f'<a href="https://www.example.com/p">{long_text}</a>'
+        "</body></html>"
+    )
+    tree = lxml_html.fromstring(html)
+    links = collect_links(tree, "https://www.example.com/page")
+    hrefs = [link.href for link in links]
+    assert hrefs == ["https://www.example.com/p"]
+    assert len(links[0].text) == LINK_TEXT_MAX_CHARS

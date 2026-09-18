@@ -11,6 +11,7 @@ UNSUPPORTED_CONTENT = "unsupported_content"
 TOO_LARGE = "too_large"
 UNAUTHORIZED_UPSTREAM = "unauthorized_upstream"
 EXTRACT_EMPTY = "extract_empty"
+RATE_LIMITED = "rate_limited"
 INTERNAL = "internal"
 
 HTTP_STATUS: dict[str, int] = {
@@ -21,6 +22,7 @@ HTTP_STATUS: dict[str, int] = {
     TIMEOUT: 504,
     FETCH_FAILED: 502,
     UNAUTHORIZED_UPSTREAM: 502,
+    RATE_LIMITED: 429,
     INTERNAL: 500,
 }
 
@@ -65,3 +67,7 @@ def unauthorized_upstream(message: str, detail: dict[str, Any] | None = None) ->
 
 def extract_empty(message: str = "Could not extract title or main text", detail: dict[str, Any] | None = None) -> ArachneError:
     return ArachneError(EXTRACT_EMPTY, message, detail)
+
+
+def rate_limited(message: str = "Rate limit exceeded", detail: dict[str, Any] | None = None) -> ArachneError:
+    return ArachneError(RATE_LIMITED, message, detail)

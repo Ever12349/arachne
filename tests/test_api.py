@@ -17,6 +17,19 @@ def test_health(api_client: TestClient):
     assert response.json() == {"status": "ok"}
 
 
+def test_stats_shape_before_extracts(api_client: TestClient):
+    response = api_client.get("/stats")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["requests_total"] == 0
+    assert data["errors_by_code"] == {}
+    assert data["cache_hits"] == 0
+    assert data["cache_misses"] == 0
+    assert data["in_flight"] == 0
+    assert data["latency_ms_sum"] == 0 or data["latency_ms_sum"] == 0.0
+    assert data["latency_ms_count"] == 0
+
+
 def test_get_extract_success(api_client: TestClient):
     response = api_client.get("/extract", params={"url": "https://www.example.com/article"})
     assert response.status_code == 200
@@ -26,6 +39,8 @@ def test_get_extract_success(api_client: TestClient):
     assert data["status_code"] == 200
     assert data["title"]
     assert data["main_text"]
+    assert data["truncated"] is False
+    assert "cached" not in data
     assert "description" in data["metadata"]
     assert "og" in data["metadata"]
     assert data["metadata"]["og"]["title"] == "OG Title"

@@ -1,4 +1,4 @@
-"""Arachne P0: synchronous URL → structured JSON extract."""
+"""Arachne P1: synchronous URL → structured JSON extract for AI agents."""
 
 from __future__ import annotations
 
@@ -12,16 +12,22 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.cache import ResultCache
+from app.config import CACHE_MAXSIZE, CACHE_TTL_SECONDS, MAX_CONCURRENCY, QPS
 from app.errors import ArachneError, http_status_for
 from app.fetch import create_http_client
-from app.models import ErrorResponse, ExtractRequest, ExtractResponse
-from app.service import extract_page
+from app.limits import FixedWindowRateLimiter, Stats, extract_semaphore
+from app.logging_setup import setup_logging
+from app.models import ErrorResponse, ExtractRequest, ExtractResponse, StatsResponse
+from app.service import run_extract
 
+setup_logging()
 logger = logging.getLogger("arachne")
 
 ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
     400: {"model": ErrorResponse, "description": "bad_url"},
     422: {"model": ErrorResponse, "description": "unsupported_content | extract_empty | too_large"},
+    429: {"model": ErrorResponse, "description": "rate_limited"},
     500: {"model": ErrorResponse, "description": "internal"},
     502: {"model": ErrorResponse, "description": "fetch_failed | unauthorized_upstream"},
     504: {"model": ErrorResponse, "description": "timeout"},
@@ -32,12 +38,16 @@ ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with create_http_client() as client:
         app.state.http_client = client
+        app.state.extract_cache = ResultCache(maxsize=CACHE_MAXSIZE, ttl=CACHE_TTL_SECONDS)
+        app.state.rate_limiter = FixedWindowRateLimiter(qps=QPS)
+        app.state.extract_semaphore = extract_semaphore(MAX_CONCURRENCY)
+        app.state.stats = Stats()
         yield
 
 
 app = FastAPI(
     title="arachne",
-    version="0.1.0",
+    version="0.2.0",
     description="Synchronous URL → structured JSON extract for AI agents.",
     lifespan=lifespan,
 )
@@ -80,27 +90,58 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-async def _run_extract(url: str, client: httpx.AsyncClient) -> ExtractResponse:
-    try:
-        return await extract_page(url, client)
-    except ArachneError:
-        raise
-    except Exception:
-        logger.exception("unhandled extract error")
-        raise ArachneError("internal", "Internal server error") from None
+@app.get("/stats", response_model=StatsResponse)
+async def stats(request: Request) -> StatsResponse:
+    return StatsResponse.model_validate(request.app.state.stats.snapshot())
+
+
+async def _run_extract(
+    request: Request,
+    url: str,
+    client: httpx.AsyncClient,
+    *,
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+    max_chars: int | None = None,
+) -> ExtractResponse:
+    state = request.app.state
+    return await run_extract(
+        url=url,
+        client=client,
+        headers=headers,
+        cookies=cookies,
+        max_chars=max_chars,
+        cache=state.extract_cache,
+        limiter=state.rate_limiter,
+        semaphore=state.extract_semaphore,
+        stats=state.stats,
+    )
 
 
 @app.get("/extract", response_model=ExtractResponse, responses=ERROR_RESPONSES)
 async def extract_get(
+    request: Request,
     url: str = Query(..., description="http(s) page URL to fetch and extract"),
+    max_chars: int | None = Query(
+        default=None,
+        description="Optional main_text cap; clamped to [1, MAIN_TEXT_MAX_CHARS]",
+    ),
     client: httpx.AsyncClient = Depends(get_http_client),
 ) -> ExtractResponse:
-    return await _run_extract(url, client)
+    return await _run_extract(request, url, client, max_chars=max_chars)
 
 
 @app.post("/extract", response_model=ExtractResponse, responses=ERROR_RESPONSES)
 async def extract_post(
+    request: Request,
     body: ExtractRequest,
     client: httpx.AsyncClient = Depends(get_http_client),
 ) -> ExtractResponse:
-    return await _run_extract(body.url, client)
+    return await _run_extract(
+        request,
+        body.url,
+        client,
+        headers=body.headers,
+        cookies=body.cookies,
+        max_chars=body.max_chars,
+    )

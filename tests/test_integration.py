@@ -33,5 +33,6 @@ def test_extract_example_com():
     assert data["status_code"] == 200
     assert data["title"]
     assert data["main_text"]
+    assert data["truncated"] is False
     assert data["metadata"]["content_type"]
     assert isinstance(data["links"], list)
