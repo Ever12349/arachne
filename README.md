@@ -31,6 +31,41 @@ export ARACHNE_USER_AGENT="MyAgent/1.0"
 uvicorn app.main:app
 ```
 
+## Docker
+
+One-click (build and run in the background):
+
+```bash
+docker compose up --build -d
+```
+
+Health check:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+Extract example:
+
+```bash
+curl 'http://127.0.0.1:8000/extract?url=https://example.com'
+```
+
+Stop:
+
+```bash
+docker compose down
+```
+
+Without Compose:
+
+```bash
+docker build -t arachne .
+docker run --rm -p 8000:8000 arachne
+```
+
+Pass `ARACHNE_USER_AGENT` the same way as a local run (`-e` on `docker run`, or `environment:` in Compose). Do not bake credentials into the image.
+
 ## Extract
 
 `GET` or `POST /extract`. Prefer `POST` so later optional fields do not hit URL-length limits.
