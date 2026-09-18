@@ -53,9 +53,14 @@ class JobItemView(BaseModel):
 
 class JobView(BaseModel):
     job_id: str
+    client_id: str = "default"
     status: JobStatus
     total: int
     succeeded_count: int
     failed_count: int
     cancelled_count: int
     items: list[JobItemView]
+
+
+class JobSearchResponse(BaseModel):
+    jobs: list[JobView]

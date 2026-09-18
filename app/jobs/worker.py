@@ -58,30 +58,17 @@ class JobWorker:
                 self.queue.task_done()
 
     async def _run_job(self, job_id: str) -> None:
-        job = await self.store.get(job_id)
+        job = await self.store.start_job(job_id)
         if job is None:
             return
-        async with job.lock:
-            if job.status in {"completed", "cancelled"}:
-                return
-            if job.cancel_requested:
-                for item in job.items:
-                    if item.status == "pending":
-                        item.status = "cancelled"
-                job.status = "cancelled"
-                return
-            job.status = "running"
 
         logger.info("job start job_id=%s total=%s", job.job_id, job.total)
         sem = asyncio.Semaphore(config.JOB_CONCURRENCY)
         await asyncio.gather(*(self._run_item(job, item, sem) for item in job.items))
-
-        async with job.lock:
-            if job.cancel_requested or any(item.status == "cancelled" for item in job.items):
-                job.status = "cancelled"
-            else:
-                job.status = "completed"
-        logger.info("job done job_id=%s status=%s", job.job_id, job.status)
+        await self.store.finish_job(job_id)
+        done = await self.store.get(job_id)
+        status = done.status if done is not None else "missing"
+        logger.info("job done job_id=%s status=%s", job.job_id, status)
 
     async def _run_item(
         self,
@@ -90,12 +77,9 @@ class JobWorker:
         sem: asyncio.Semaphore,
     ) -> None:
         async with sem:
-            async with job.lock:
-                if job.cancel_requested or item.status != "pending":
-                    if item.status == "pending":
-                        item.status = "cancelled"
-                    return
-                item.status = "running"
+            started = await self.store.start_item(job.job_id, item.index)
+            if not started:
+                return
             try:
                 result = await run_extract(
                     url=item.url,
@@ -114,18 +98,20 @@ class JobWorker:
                     stats=self.app.state.stats,
                 )
             except ArachneError as exc:
-                async with job.lock:
-                    item.status = "failed"
-                    item.error = ErrorBody(code=exc.code, message=exc.message, detail=exc.detail)
+                await self.store.fail_item(
+                    job.job_id,
+                    item.index,
+                    ErrorBody(code=exc.code, message=exc.message, detail=exc.detail),
+                )
                 return
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("job item failed job_id=%s index=%s", job.job_id, item.index)
-                async with job.lock:
-                    item.status = "failed"
-                    item.error = ErrorBody(code=INTERNAL, message="Internal server error", detail={})
+                await self.store.fail_item(
+                    job.job_id,
+                    item.index,
+                    ErrorBody(code=INTERNAL, message="Internal server error", detail={}),
+                )
                 return
-            async with job.lock:
-                item.status = "succeeded"
-                item.result = result
+            await self.store.succeed_item(job.job_id, item.index, result)

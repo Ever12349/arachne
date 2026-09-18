@@ -25,6 +25,8 @@ RUN if [ -n "$PIP_INDEX_URL" ]; then \
 
 COPY app ./app
 
+RUN mkdir -p /app/data && chown arachne:arachne /app/data
+
 USER arachne
 EXPOSE 8000
 

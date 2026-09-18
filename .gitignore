@@ -16,3 +16,6 @@ build/
 data/sessions/*.bin
 data/sessions/*.json
 data/profiles/*.json
+data/*.db
+data/*.db-wal
+data/*.db-shm

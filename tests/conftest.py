@@ -92,6 +92,14 @@ def _isolated_profiles_dir(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_job_db(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """Give each test its own SQLite file; never touch ./data/arachne.db."""
+    db_path = tmp_path / "arachne.db"
+    monkeypatch.setattr("app.config.DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
+    monkeypatch.setattr("app.config.JOB_DB_TTL_SECONDS", 0)
+
+
+@pytest.fixture(autouse=True)
 def _fast_retry_backoff(monkeypatch: pytest.MonkeyPatch):
     """Unit tests should not wait on real retry sleeps."""
 

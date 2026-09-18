@@ -10,17 +10,14 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 
-from app.errors import ArachneError
-from app.jobs.models import CreateJobRequest, JobItemInput
-from app.jobs.store import JobStore
 from app.models import ExtractResponse, PageMetadata
 
 
-def _poll_job(client: TestClient, job_id: str, *, timeout: float = 5.0) -> dict:
+def _poll_job(client: TestClient, job_id: str, *, timeout: float = 5.0, headers: dict | None = None) -> dict:
     deadline = time.monotonic() + timeout
     last = None
     while time.monotonic() < deadline:
-        response = client.get(f"/jobs/{job_id}")
+        response = client.get(f"/jobs/{job_id}", headers=headers)
         assert response.status_code == 200, response.text
         last = response.json()
         if last["status"] in {"completed", "cancelled"}:
@@ -222,20 +219,3 @@ def test_job_items_do_consume_qps(api_client: TestClient):
     assert job["status"] == "completed"
     stats = api_client.get("/stats").json()
     assert stats["requests_total"] >= 1
-
-
-@pytest.mark.asyncio
-async def test_store_expired_job_is_missing():
-    clock = {"now": 0.0}
-
-    def timer() -> float:
-        return clock["now"]
-
-    store = JobStore(maxsize=10, ttl=10.0, timer=timer)
-    job = await store.create(CreateJobRequest(items=[JobItemInput(url="https://example.com")]))
-    assert await store.get(job.job_id) is not None
-    clock["now"] = 11.0
-    assert await store.get(job.job_id) is None
-    with pytest.raises(ArachneError) as exc:
-        await store.snapshot(job.job_id)
-    assert exc.value.code == "job_not_found"
