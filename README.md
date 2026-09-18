@@ -45,18 +45,21 @@ One-click (build and run in the background):
 docker compose up --build -d
 ```
 
-If Docker Hub is blocked (common in mainland China), overlay the mirror Compose file so the Python base image is pulled from a China-accessible mirror:
+Docker Hub timeouts and PyPI timeouts are independent. A DaoCloud (or other) base-image pull can still fail later at `pip install` if `files.pythonhosted.org` is unreachable. Overlay the mirror Compose file to cover **both**: Python image from a Docker Hub mirror, packages from a PyPI mirror.
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.mirror.yml up --build -d
 ```
 
-The overlay defaults to `docker.m.daocloud.io/library/python:3.12-slim`. Public mirrors change; if that host is down, pick another `library/python:3.12-slim` mirror (for example Aliyun) and override `PYTHON_IMAGE`.
+Defaults in the overlay: `PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.12-slim` and Tsinghua pip (`https://pypi.tuna.tsinghua.edu.cn/simple`). Public mirrors change; swap hosts if one is down. For pip, Aliyun is an alternative: `PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple` and `PIP_TRUSTED_HOST=mirrors.aliyun.com`.
 
-Override the base image without editing files:
+Override without editing files:
 
 ```bash
-docker compose build --build-arg PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.12-slim
+docker compose build \
+  --build-arg PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.12-slim \
+  --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+  --build-arg PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
 docker compose up -d
 ```
 
@@ -85,10 +88,14 @@ docker build -t arachne .
 docker run --rm -p 8000:8000 arachne
 ```
 
-Same `PYTHON_IMAGE` override for a plain `docker build`:
+Same image and pip-index overrides for a plain `docker build`:
 
 ```bash
-docker build --build-arg PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.12-slim -t arachne .
+docker build \
+  --build-arg PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.12-slim \
+  --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+  --build-arg PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn \
+  -t arachne .
 ```
 
 Pass `ARACHNE_USER_AGENT` and the other `ARACHNE_*` settings the same way as a local run (`-e` on `docker run`, or `environment:` in Compose). Do not bake credentials into the image.
