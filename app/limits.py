@@ -23,13 +23,13 @@ class FixedWindowRateLimiter:
         self.window_seconds = window_seconds
         self._clock = clock
         self._lock = asyncio.Lock()
-        self._window_start = 0.0
+        self._window_start: float | None = None
         self._count = 0
 
     async def try_acquire(self) -> bool:
         async with self._lock:
             now = self._clock()
-            if self._window_start == 0.0 or now - self._window_start >= self.window_seconds:
+            if self._window_start is None or now - self._window_start >= self.window_seconds:
                 self._window_start = now
                 self._count = 0
             if self._count >= self.qps:
