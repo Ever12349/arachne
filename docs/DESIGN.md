@@ -1,8 +1,8 @@
 # arachne 设计文档
 
-> 版本：v0.3.0 · 受众：维护者与调用方（AI Agent 系统）  
+> 版本：v0.4.0 · 受众：维护者与调用方（AI Agent 系统）  
 > 仓库：https://github.com/Ever12349/arachne  
-> 状态：P2 已落地（加密会话引用、防御性反爬、可选 Playwright `render`）。默认镜像仍不含浏览器。无站点规则 / 队列 / DB。
+> 状态：P3 已落地（JSON 站点 profiles、host 自动匹配、可选 `site_profile`、热加载）。默认镜像仍不含浏览器。无队列 / DB。
 
 ## 1. 定位
 
@@ -13,7 +13,7 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 - 契约稳定、字段语义清晰
 - 错误可机读（`error.code`）
 - 延迟与体量可控（超时、响应上限、链接封顶、QPS/并发、缓存）
-- 可在 Agent 工作流里同步调用（P0–P2），后续支持异步任务（批量队列）
+- 可在 Agent 工作流里同步调用（P0–P3），后续支持异步任务（批量队列）
 
 **非定位**：通用浏览器自动化 IDE、恶意爬虫框架、认证攻击工具。
 
@@ -27,7 +27,8 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 | 稳定 HTTP API | FastAPI，供 Agent 工具层调用 |
 | 生产可用性（P1） | POST 会话注入、速率/并发、TTL 缓存、`max_chars`、`/stats` |
 | 登录态与反爬韧性（P2） | 加密 `session_id`、超时/连接重试、UA 策略、挑战页识别、可选 `render` |
-| 可演进 | 站点规则、批量、持久化按路线图推进 |
+| 站点专用规则（P3） | `ARACHNE_PROFILES_DIR` 下 JSON profiles；POST `site_profile` 或按最终 URL host 自动匹配 |
+| 可演进 | 批量、持久化按路线图推进 |
 
 ### 2.2 安全与合规边界（硬约束）
 
@@ -40,15 +41,15 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 
 ## 3. API 契约（面向 Agent）
 
-契约版本 **0.3.0**。
+契约版本 **0.4.0**。
 
-### 3.1 端点（P2）
+### 3.1 端点（P3）
 
 | 方法 | 路径 | 作用 |
 |------|------|------|
 | `GET` | `/health` | 探活（**免** QPS 与抽取并发） |
 | `GET` | `/stats` | 进程内计数器（**免** QPS 与抽取并发） |
-| `GET` | `/extract?url=&max_chars=` | 同步抽取；可选 `max_chars`。**无** cookies/headers/`session_id`/`ua_strategy`/`render` |
+| `GET` | `/extract?url=&max_chars=` | 同步抽取；可选 `max_chars`。**无** cookies/headers/`session_id`/`ua_strategy`/`render`/`site_profile` |
 | `POST` | `/extract` | 同步抽取；见下表 JSON 字段 |
 
 POST `/extract` JSON：
@@ -62,17 +63,19 @@ POST `/extract` JSON：
 | `session_id` | string | 省略 | 引用 `ARACHNE_SESSIONS_DIR/{id}.bin` |
 | `ua_strategy` | `"default"` \| `"rotate"` | `"default"` | `rotate` 使用内置小型 UA 池；调用方/会话里的 `User-Agent` 仍优先 |
 | `render` | bool | `false` | `true` 时用 Playwright 取 HTML；未安装 → `render_unavailable` |
+| `site_profile` | string | 省略 | 按 profile id **强制**加载；缺文件或非法 id → `profile_invalid`（400）。省略则按最终 URL host 自动匹配 |
 
 后续（见路线图）可增加例如：
 
 - `POST /jobs` / `GET /jobs/{id}` — 批量与异步
-- `POST /extract` 扩展字段：`site_profile` 等
 
 GET 会话、成功响应上的 `cached` 字段、错误结果缓存：**不做**。
 
 ### 3.2 成功响应
 
 `links` 使用对象列表。`url` 为重定向后的最终地址；`requested_url` 为调用方原始 URL。metadata 字符串字段缺省为 `""`。`truncated` 默认 `false`：仅在 `main_text` 因 `max_chars` 或硬上限被截断时为 `true`。成功体 **没有** `cached` 字段；命中只计入日志与 `/stats`。
+
+`profile_id` / `profile_version` 在未选中 profile 时为 `""`。`profile_fallback` 仅在**已选中** profile、但 title/main 选择器未抽到内容、因而回退 trafilatura/generic 时为 `true`；无 profile 或 profile 选择器成功时为 `false`。
 
 ```json
 {
@@ -94,11 +97,14 @@ GET 会话、成功响应上的 `cached` 字段、错误结果缓存：**不做*
   "links": [
     {"href": "https://example.com/a", "text": "A"}
   ],
-  "truncated": false
+  "truncated": false,
+  "profile_id": "",
+  "profile_version": "",
+  "profile_fallback": false
 }
 ```
 
-正文由 trafilatura 从已下载（或已渲染）HTML 抽取；若 `title` 与 `main_text` 均为空 → `extract_empty`。
+无 profile 时正文由 trafilatura 从已下载（或已渲染）HTML 抽取；若 `title` 与 `main_text` 均为空 → `extract_empty`。有 profile 时见 §3.9。
 
 `max_chars` / 硬上限（在缓存写入**之后**应用）：
 
@@ -114,7 +120,7 @@ HTTP 状态与业务码分离；body 统一：
 ```json
 {
   "error": {
-    "code": "bad_url | session_invalid | challenge_detected | fetch_failed | timeout | unsupported_content | too_large | unauthorized_upstream | extract_empty | rate_limited | render_unavailable | render_failed | internal",
+    "code": "bad_url | session_invalid | profile_invalid | challenge_detected | fetch_failed | timeout | unsupported_content | too_large | unauthorized_upstream | extract_empty | rate_limited | render_unavailable | render_failed | internal",
     "message": "人类可读短句",
     "detail": {}
   }
@@ -127,6 +133,7 @@ HTTP 状态与业务码分离；body 统一：
 |------|------|
 | `bad_url` | 400 |
 | `session_invalid` | 400 |
+| `profile_invalid` | 400 |
 | `challenge_detected` | 403 |
 | `unsupported_content` / `extract_empty` / `too_large` | 422 |
 | `rate_limited` | 429 |
@@ -188,10 +195,10 @@ python scripts/write_session.py --id demo \
 
 ### 3.6 调用约定（给 Agent 集成）
 
-- 需要会话、UA 策略或 `render` 时必须 `POST /extract`；GET 只有 `url` + 可选 `max_chars`
+- 需要会话、UA 策略、`render` 或 `site_profile` 时必须 `POST /extract`；GET 只有 `url` + 可选 `max_chars`
 - 设置客户端超时略大于服务端读超时 / 渲染超时（建议服务端 15s，Agent 侧 ≥ 20s；`render=true` 时按 `ARACHNE_RENDER_TIMEOUT` 再留余量）
 - 把 `main_text` 当作模型上下文的主输入；用 `max_chars` 控制 prompt 体积
-- 同一规范化 URL + 合并后会话指纹 + `render` + `ua_strategy` 在 TTL 内命中进程内缓存（响应体仍无 `cached` 字段）
+- 同一规范化 URL + 合并后会话指纹 + `render` + `ua_strategy` + `profile_id@version` 在 TTL 内命中进程内缓存（响应体仍无 `cached` 字段）
 - 全局限流：固定 1 秒窗口 QPS=5（可环境变量覆盖）；超出 → `rate_limited` / 429
 - 遇到 `challenge_detected`：换 Cookie、`ua_strategy=rotate` 或 `render=true`（需 Playwright 镜像），不要指望服务端解验证码
 - 遇到 `session_invalid`：检查 id、密钥、会话文件；不要把密钥放进 prompt
@@ -216,19 +223,59 @@ python scripts/write_session.py --id demo \
 - 渲染走**同一**抽取 `asyncio.Semaphore`
 - 独立依赖：`requirements-playwright.txt` + `Dockerfile.playwright`
 
+### 3.9 站点 profiles（P3）
+
+JSON 文件，一 profile 一文件，目录由 `ARACHNE_PROFILES_DIR` 指定（默认 `./data/profiles`）。目录为空或不存在时合法：全部走通用抽取。**不要**把 `profiles/examples/` 配成默认目录；该目录只作文档样例。
+
+文件名 `{profile_id}.json`，`profile_id` 必须匹配 `^[A-Za-z0-9_-]{1,64}$`，且与 JSON 内 `id` 一致。
+
+```json
+{
+  "id": "example-com",
+  "version": "1",
+  "hosts": ["example.com"],
+  "title_selector": "h1.article-title",
+  "main_selector": "article .content",
+  "remove_selectors": [".ads", "nav"],
+  "meta": { "description": "meta[name='description']" },
+  "strict": false,
+  "disable_links": false
+}
+```
+
+- `hosts` 必填且至少 1 个；匹配时用 `normalize_host`（去前导 `www.`、小写）
+- 多个 profile 声明同一 host：`profile_id` **字典序最大**者胜出，并打 warning 日志
+- 热加载：轮询目录及 `*.json` 的 mtime，debounce 1s；坏 JSON / 非法 schema / id 与文件名不符 → 跳过并打日志，这些 host 回退通用抽取
+- 选择器仅为 CSS（lxml + cssselect）。非法选择器视为该字段失败，不 500
+- **不做**：host glob、XPath、DB、远程拉取、profile 内自定义 Python
+
+**解析与应用（fetch + 挑战检测之后）**
+
+1. 解析 profile：POST `site_profile` 强制按 id；省略则按**最终 URL** host 自动匹配。显式 id 缺失/非法 → `profile_invalid`（400），不 fetch 之后的抽取
+2. lxml 解析 HTML，执行 `remove_selectors`
+3. 对已设置的 title / main / meta 做 CSS 选取（meta 支持 `description`、`language`；`meta` 标签优先 `content`）
+4. title 与 main **都空**：`strict=true` → `extract_empty`；否则回退现有 trafilatura/generic（在已 remove 的 HTML 上）并 `profile_fallback=true`
+5. `disable_links=true` → `links=[]`；否则用现有全页 `<a>` 收集（基于 remove 后的树）
+
+GET `/extract` 仍可按 host 自动匹配，但不能传 `site_profile`。
+
+修改选择器后应递增 `version`：缓存键含 `profile_id@version`，未升版本时可能在 TTL 内命中旧结果。
+
 ## 4. 架构
 
-### 4.1 P2 同步流水线
+### 4.1 P3 同步流水线
 
 ```
 Agent → FastAPI /extract
           → 加载/合并 session_id（若有）
+          → 解析 site_profile（显式 id）或按请求 URL host 预匹配（缓存键）
           → QPS（全局固定 1s 窗口）
-          → cache lookup（规范化 URL + 会话指纹 + render + ua_strategy）
+          → cache lookup（规范化 URL + 会话指纹 + render + ua_strategy + profile_id@version）
           → (miss) asyncio.Semaphore
                → headers_for_upstream (UA 策略)
                → fetch(httpx + 超时/连接重试) 或 render(Playwright)
-               → 挑战检测 → 状态码拒绝 / extract
+               → 挑战检测 → 状态码拒绝
+               → 按最终 URL host（或显式 id）应用 profile → extract
           → store cache（仅成功 ExtractResponse）
           → apply max_chars / 硬上限 + truncated
           → ExtractResponse JSON
@@ -242,7 +289,7 @@ Agent → FastAPI /extract
 app/
   main.py            # 路由、lifespan、错误映射
   models.py          # Pydantic 请求/响应/Error/Stats
-  config.py          # 超时、UA、体积、并发、QPS、缓存、会话、重试、渲染超时
+  config.py          # 超时、UA、体积、并发、QPS、缓存、会话、重试、渲染超时、profiles 目录
   errors.py          # ArachneError 与 HTTP 映射
   ssrf.py            # getaddrinfo + 非公网地址拒绝
   fetch.py           # httpx 异步拉取（可选 headers/cookies）
@@ -255,15 +302,17 @@ app/
   sessions.py        # Fernet 会话读写与合并
   antibot.py         # 重试、UA 池、挑战标记
   render.py          # 可选 Playwright（动态 import）
+  profiles/          # P3 站点规则：schema / loader / apply
 scripts/
   write_session.py   # 离线写入 {id}.bin
+profiles/
+  examples/          # 文档样例；不是默认 ARACHNE_PROFILES_DIR
 ```
 
 后续扩展（不堵死）：
 
 ```
 app/
-  profiles/       # 站点专用规则（P3）
   jobs/           # 队列与任务状态（P4）
   store/          # 结果与任务持久化（P5）
 ```
@@ -274,7 +323,7 @@ app/
 |----|------|------|
 | API | FastAPI + uvicorn | 异步、OpenAPI、适合工具调用 |
 | 拉取 | httpx（async） | 超时/重定向清晰 |
-| 抽取 | trafilatura（首选） | 正文质量好、依赖相对可控 |
+| 抽取 | trafilatura（首选）+ lxml CSS profiles | 正文质量好；P3 站点选择器走 cssselect |
 | 缓存 | cachetools.TTLCache | 进程内短 TTL；`requirements.txt` 用 `==` 钉死 |
 | 会话加密 | cryptography Fernet | 对称加密会话文件；密钥仅环境变量 |
 | 渲染 | 可选 Playwright | 独立 `requirements-playwright.txt`；默认镜像无浏览器 |
@@ -292,9 +341,10 @@ app/
 - 共享 `httpx.AsyncClient`（FastAPI lifespan）
 - 全局固定窗口 QPS=5（`ARACHNE_QPS`）；抽取并发 `asyncio.Semaphore(10)`（`ARACHNE_MAX_CONCURRENCY`），仅 cache miss（含 `render=true`）
 - 缓存：`TTLCache` TTL=60s、maxsize=256（`ARACHNE_CACHE_TTL_SECONDS`、`ARACHNE_CACHE_MAXSIZE`）
-- 缓存键：规范化 URL（scheme/host 小写、去掉默认端口与 fragment、**保留 query 原顺序**）+ 会话指纹（合并后的 headers/cookies canonical JSON 再 sha256）+ `render` 标志 + `ua_strategy`
-- 只缓存成功 `ExtractResponse`，不缓存错误（含 `challenge_detected` / `render_*` / `session_invalid`）
+- 缓存键：规范化 URL（scheme/host 小写、去掉默认端口与 fragment、**保留 query 原顺序**）+ 会话指纹（合并后的 headers/cookies canonical JSON 再 sha256）+ `render` 标志 + `ua_strategy` + `profile_id@version`（无 profile 时该段为空字符串）
+- 只缓存成功 `ExtractResponse`，不缓存错误（含 `challenge_detected` / `render_*` / `session_invalid` / `profile_invalid`）
 - 会话：`ARACHNE_SESSIONS_DIR`（默认 `./data/sessions`）、`ARACHNE_SESSION_KEY`
+- 站点规则：`ARACHNE_PROFILES_DIR`（默认 `./data/profiles`，可为空）；热加载 debounce 1s
 - 重试：`ARACHNE_MAX_RETRIES=2`，`ARACHNE_RETRY_BACKOFF_SECONDS=0.5,1`
 - 渲染超时：`ARACHNE_RENDER_TIMEOUT=15`
 
@@ -308,7 +358,7 @@ app/
 
 ### 4.6 可观测性
 
-抽取日志字段：`latency_ms`、`error_code`、`cache`（hit/miss）、`session`（指纹前缀）、`url`。禁止记录 Cookie / Authorization / cookies / 会话明文。重试只记录 `attempt` / `delay_s` / `error_code`。
+抽取日志字段：`latency_ms`、`error_code`、`cache`（hit/miss）、`session`（指纹前缀）、`profile`（`id@version` 或 `-`）、`url`。禁止记录 Cookie / Authorization / cookies / 会话明文。重试只记录 `attempt` / `delay_s` / `error_code`。
 
 ## 5. 实现分期（开发计划）
 
@@ -336,13 +386,17 @@ app/
 - [x] **受控登录态**：POST 注入约定 + 可选加密 `session_id`（Fernet 文件；`scripts/write_session.py`；无会话 HTTP API）
 - [x] **反爬对抗（防御性）**：超时/连接重试与退避、`ua_strategy`、挑战页 → `challenge_detected`
 - [x] 可选 `render=true`（Playwright 动态 import；默认镜像无浏览器）
-- [x] **不做**：验证码破解服务、自动撞登录、漏洞利用、站点 profiles（P3）、队列（P4）、DB（P5）
+- [x] **不做**：验证码破解服务、自动撞登录、漏洞利用、队列（P4）、DB（P5）
 
-### P3 — 站点专用规则库
+### P3 — 站点专用规则库（已实现）
 
-- [ ] `site_profile`：按 host 的选择器 / 字段映射 / 禁用规则
-- [ ] 规则热更新（文件或 DB）；未知站点回退通用抽取
-- [ ] 规则版本号进入响应，便于 Agent 调试
+- [x] JSON 文件 profiles（`ARACHNE_PROFILES_DIR`）；`hosts` + CSS `title_selector` / `main_selector` / `remove_selectors` / `meta` / `strict` / `disable_links`
+- [x] POST 可选 `site_profile`（强制 id）；省略则按最终 URL host 自动匹配（`normalize_host`）
+- [x] 显式 id 缺失/非法 → `profile_invalid`（400）；未知站点或坏文件跳过 → 通用抽取
+- [x] 同 host 冲突：字典序最大 `profile_id` 获胜 + warning
+- [x] 目录 mtime 热加载（debounce 1s）
+- [x] 响应 `profile_id` / `profile_version` / `profile_fallback`；缓存键含 `profile_id@version`
+- [x] **不做**：host glob、XPath、DB、远程拉取、profile 内 Python、队列（P4）、DB 持久化（P5）
 
 ### P4 — 批量队列
 
@@ -374,26 +428,26 @@ flowchart LR
 |----------------|------|------|
 | 登录态 / Cookie 抓取 | P1 注入 + P2 会话文件 | 调用方授权后注入或引用加密文件；非服务端代登破解 |
 | 反爬对抗 | P2 | 韧性与可观测，非攻击工具 |
-| 站点专用规则库 | P3 | |
+| 站点专用规则库 | P3 | 本地 JSON；非 DB |
 | 批量队列 | P4 | |
 | 持久化存储 | P5 | |
 | 「认证绕过」 | **不实现攻击型绕过** | 以受控会话 + 明确错误码替代 |
 
 ## 7. 与当前仓库状态
 
-- P2 已实现：`GET/POST /extract`；POST 可带会话注入、`session_id`、`ua_strategy`、`render`
-- 运行时依赖钉死在 `requirements.txt`（`==`，含 `cachetools`、`cryptography`）；Playwright 见 `requirements-playwright.txt`
+- P3 已实现：`GET/POST /extract`；POST 可带会话注入、`session_id`、`ua_strategy`、`render`、`site_profile`
+- 运行时依赖钉死在 `requirements.txt`（`==`，含 `cachetools`、`cryptography`、`cssselect`）；Playwright 见 `requirements-playwright.txt`
 - 单元测试默认不访问网络、不需要浏览器；活测：`ARACHNE_INTEGRATION=1 pytest -m integration`
 
-## 8. 验收（P2）
+## 8. 验收（P3）
 
 1. `uvicorn app.main:app` 可在**未安装 Playwright** 时启动  
-2. 对公开 HTML 页请求 `/extract`，`title` 与 `main_text` 非空，含 `truncated`  
-3. 非法 URL / 超时 / 非 HTML / 空抽取 / 超体积 / 超 QPS / 坏会话 / 挑战页 / 无 Playwright 的 `render` 返回约定 `error.code`  
-4. POST `cookies` / `session_id` 进入上游请求；禁止头被剥离；GET 无会话与 render 字段  
-5. `GET /stats` 返回约定计数器；cache hit 不触发二次上游拉取；`render` / `ua_strategy` 会拆缓存键  
-6. README 含会话写入、`ua_strategy`、`render`、Playwright 镜像说明  
-7. `pytest -m "not integration"` 通过（mock；不要求本机有浏览器）
+2. 对公开 HTML 页请求 `/extract`，`title` 与 `main_text` 非空，含 `truncated` 与 profile 三字段  
+3. 非法 URL / 超时 / 非 HTML / 空抽取 / 超体积 / 超 QPS / 坏会话 / 坏 `site_profile` / 挑战页 / 无 Playwright 的 `render` 返回约定 `error.code`  
+4. POST `cookies` / `session_id` 进入上游请求；禁止头被剥离；GET 无会话、render、`site_profile` 字段  
+5. `GET /stats` 返回约定计数器；cache hit 不触发二次上游拉取；`render` / `ua_strategy` / `profile_id@version` 会拆缓存键  
+6. README 含会话写入、`ua_strategy`、`render`、Playwright 镜像、profiles 目录与 schema 说明  
+7. `pytest -m "not integration"` 通过（mock；不要求本机有浏览器）；profiles 覆盖 match / conflict / `profile_invalid` / strict / fallback / cache key
 
 ---
 

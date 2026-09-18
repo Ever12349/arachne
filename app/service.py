@@ -18,11 +18,13 @@ from app.errors import (
     unauthorized_upstream,
     unsupported_content,
 )
-from app.extract import apply_max_chars, extract_html
+from app.extract import apply_max_chars
 from app.fetch import FetchedPage, is_html_content_type
 from app.headers_policy import filter_request_headers
 from app.limits import FixedWindowRateLimiter, Stats
 from app.models import ExtractResponse
+from app.profiles.apply import extract_with_profile
+from app.profiles.loader import ProfileRegistry, resolve_profile
 from app.render import render_url
 from app.sessions import load_session, merge_session_material
 
@@ -50,6 +52,8 @@ async def extract_page(
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     render: bool = False,
+    site_profile: str | None = None,
+    profiles: ProfileRegistry | None = None,
 ) -> ExtractResponse:
     requested = (url or "").strip()
     if render:
@@ -64,8 +68,10 @@ async def extract_page(
             {"content_type": page.content_type, "status_code": page.status_code},
         )
     try:
-        return extract_html(
+        profile = resolve_profile(profiles, site_profile=site_profile, url=page.final_url)
+        return extract_with_profile(
             page.body,
+            profile=profile,
             requested_url=requested,
             final_url=page.final_url,
             status_code=page.status_code,
@@ -85,15 +91,17 @@ def _log_extract(
     latency_ms: float,
     error_code: str | None,
     session_prefix: str,
+    profile: str,
 ) -> None:
     # Structured fields only: never log Cookie / Authorization / cookies / session plaintext.
     logger.info(
-        "extract url=%s cache=%s latency_ms=%.2f error_code=%s session=%s",
+        "extract url=%s cache=%s latency_ms=%.2f error_code=%s session=%s profile=%s",
         url,
         cache_status or "-",
         latency_ms,
         error_code or "-",
         session_prefix,
+        profile or "-",
     )
 
 
@@ -107,6 +115,8 @@ async def run_extract(
     session_id: str | None = None,
     ua_strategy: str = "default",
     render: bool = False,
+    site_profile: str | None = None,
+    profiles: ProfileRegistry | None = None,
     cache: ResultCache,
     limiter: FixedWindowRateLimiter,
     semaphore: asyncio.Semaphore,
@@ -118,6 +128,7 @@ async def run_extract(
     error_code: str | None = None
     cache_status: str | None = None
     session_prefix = "-"
+    profile_label = "-"
     requested = (url or "").strip()
     entered_inflight = False
 
@@ -131,6 +142,7 @@ async def run_extract(
             latency_ms=latency_ms,
             error_code=error_code,
             session_prefix=session_prefix,
+            profile=profile_label,
         )
 
     try:
@@ -141,6 +153,11 @@ async def run_extract(
         fingerprint = session_fingerprint(safe_headers, safe_cookies)
         session_prefix = fingerprint[:_SESSION_PREFIX_LEN]
         strategy = ua_strategy or "default"
+        explicit = (site_profile or "").strip() or None
+        lookup_profile = resolve_profile(profiles, site_profile=explicit, url=requested)
+        lookup_id = lookup_profile.id if lookup_profile else ""
+        lookup_version = lookup_profile.version if lookup_profile else ""
+        profile_label = f"{lookup_id}@{lookup_version}" if lookup_id else "-"
 
         if not await limiter.try_acquire():
             raise rate_limited()
@@ -153,6 +170,8 @@ async def run_extract(
             safe_cookies,
             render=render,
             ua_strategy=strategy,
+            profile_id=lookup_id,
+            profile_version=lookup_version,
         )
         cached = await cache.get(key)
         if cached is not None:
@@ -170,6 +189,8 @@ async def run_extract(
                 headers=upstream_headers or None,
                 cookies=safe_cookies or None,
                 render=render,
+                site_profile=explicit,
+                profiles=profiles,
             )
         await cache.set(key, result)
         return apply_max_chars(result, max_chars)

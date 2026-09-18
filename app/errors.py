@@ -14,6 +14,7 @@ EXTRACT_EMPTY = "extract_empty"
 RATE_LIMITED = "rate_limited"
 INTERNAL = "internal"
 SESSION_INVALID = "session_invalid"
+PROFILE_INVALID = "profile_invalid"
 CHALLENGE_DETECTED = "challenge_detected"
 RENDER_UNAVAILABLE = "render_unavailable"
 RENDER_FAILED = "render_failed"
@@ -21,6 +22,7 @@ RENDER_FAILED = "render_failed"
 HTTP_STATUS: dict[str, int] = {
     BAD_URL: 400,
     SESSION_INVALID: 400,
+    PROFILE_INVALID: 400,
     CHALLENGE_DETECTED: 403,
     UNSUPPORTED_CONTENT: 422,
     EXTRACT_EMPTY: 422,
@@ -83,6 +85,10 @@ def rate_limited(message: str = "Rate limit exceeded", detail: dict[str, Any] | 
 
 def session_invalid(message: str = "Invalid session", detail: dict[str, Any] | None = None) -> ArachneError:
     return ArachneError(SESSION_INVALID, message, detail)
+
+
+def profile_invalid(message: str = "Invalid site profile", detail: dict[str, Any] | None = None) -> ArachneError:
+    return ArachneError(PROFILE_INVALID, message, detail)
 
 
 def challenge_detected(message: str = "Upstream returned a bot challenge page", detail: dict[str, Any] | None = None) -> ArachneError:
