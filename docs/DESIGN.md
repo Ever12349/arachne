@@ -1,8 +1,8 @@
 # arachne 设计文档
 
-> 版本：v0.4.0 · 受众：维护者与调用方（AI Agent 系统）  
+> 版本：v0.5.0 · 受众：维护者与调用方（AI Agent 系统）  
 > 仓库：https://github.com/Ever12349/arachne  
-> 状态：P3 已落地（JSON 站点 profiles、host 自动匹配、可选 `site_profile`、热加载）。默认镜像仍不含浏览器。无队列 / DB。
+> 状态：P4 已落地（进程内批量 jobs：`POST /jobs`、轮询 `GET /jobs/{id}`、`POST /jobs/{id}/cancel`）。默认镜像仍不含浏览器。无 Redis / DB / webhook。进程重启丢失 jobs。
 
 ## 1. 定位
 
@@ -13,7 +13,7 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 - 契约稳定、字段语义清晰
 - 错误可机读（`error.code`）
 - 延迟与体量可控（超时、响应上限、链接封顶、QPS/并发、缓存）
-- 可在 Agent 工作流里同步调用（P0–P3），后续支持异步任务（批量队列）
+- 可在 Agent 工作流里同步调用（P0–P3），或提交批量 jobs 后轮询（P4）
 
 **非定位**：通用浏览器自动化 IDE、恶意爬虫框架、认证攻击工具。
 
@@ -28,7 +28,8 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 | 生产可用性（P1） | POST 会话注入、速率/并发、TTL 缓存、`max_chars`、`/stats` |
 | 登录态与反爬韧性（P2） | 加密 `session_id`、超时/连接重试、UA 策略、挑战页识别、可选 `render` |
 | 站点专用规则（P3） | `ARACHNE_PROFILES_DIR` 下 JSON profiles；POST `site_profile` 或按最终 URL host 自动匹配 |
-| 可演进 | 批量、持久化按路线图推进 |
+| 批量队列（P4） | 进程内 `asyncio.Queue`；`POST /jobs` / `GET /jobs/{id}` / `POST /jobs/{id}/cancel`；轮询，无 list、无 webhook |
+| 可演进 | 持久化按路线图推进 |
 
 ### 2.2 安全与合规边界（硬约束）
 
@@ -41,9 +42,9 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 
 ## 3. API 契约（面向 Agent）
 
-契约版本 **0.4.0**。
+契约版本 **0.5.0**。
 
-### 3.1 端点（P3）
+### 3.1 端点（P4）
 
 | 方法 | 路径 | 作用 |
 |------|------|------|
@@ -51,6 +52,9 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 | `GET` | `/stats` | 进程内计数器（**免** QPS 与抽取并发） |
 | `GET` | `/extract?url=&max_chars=` | 同步抽取；可选 `max_chars`。**无** cookies/headers/`session_id`/`ua_strategy`/`render`/`site_profile` |
 | `POST` | `/extract` | 同步抽取；见下表 JSON 字段 |
+| `POST` | `/jobs` | 提交批量抽取；HTTP 202；**创建本身不消耗**全局 QPS |
+| `GET` | `/jobs/{id}` | 任务状态、计数、每条 item 的 status/result |
+| `POST` | `/jobs/{id}/cancel` | 取消仍为 pending 的 item；running 跑完并记录结果；已终态幂等 200 |
 
 POST `/extract` JSON：
 
@@ -65,11 +69,7 @@ POST `/extract` JSON：
 | `render` | bool | `false` | `true` 时用 Playwright 取 HTML；未安装 → `render_unavailable` |
 | `site_profile` | string | 省略 | 按 profile id **强制**加载；缺文件或非法 id → `profile_invalid`（400）。省略则按最终 URL host 自动匹配 |
 
-后续（见路线图）可增加例如：
-
-- `POST /jobs` / `GET /jobs/{id}` — 批量与异步
-
-GET 会话、成功响应上的 `cached` 字段、错误结果缓存：**不做**。
+**没有** `GET /jobs` 列表，也没有 webhook。GET 会话、成功响应上的 `cached` 字段、错误结果缓存：**不做**。
 
 ### 3.2 成功响应
 
@@ -120,7 +120,7 @@ HTTP 状态与业务码分离；body 统一：
 ```json
 {
   "error": {
-    "code": "bad_url | session_invalid | profile_invalid | challenge_detected | fetch_failed | timeout | unsupported_content | too_large | unauthorized_upstream | extract_empty | rate_limited | render_unavailable | render_failed | internal",
+    "code": "bad_url | session_invalid | profile_invalid | challenge_detected | fetch_failed | timeout | unsupported_content | too_large | unauthorized_upstream | extract_empty | rate_limited | render_unavailable | render_failed | job_not_found | internal",
     "message": "人类可读短句",
     "detail": {}
   }
@@ -137,6 +137,7 @@ HTTP 状态与业务码分离；body 统一：
 | `challenge_detected` | 403 |
 | `unsupported_content` / `extract_empty` / `too_large` | 422 |
 | `rate_limited` | 429 |
+| `job_not_found` | 404 |
 | `timeout` | 504 |
 | `fetch_failed` / `unauthorized_upstream` / `render_failed` | 502 |
 | `render_unavailable` | 501 |
@@ -261,6 +262,79 @@ GET `/extract` 仍可按 host 自动匹配，但不能传 `site_profile`。
 
 修改选择器后应递增 `version`：缓存键含 `profile_id@version`，未升版本时可能在 TTL 内命中旧结果。
 
+### 3.10 批量 jobs（P4）
+
+进程内任务：`asyncio.Queue` + **单** consumer loop。内存存储 TTL `ARACHNE_JOB_TTL_SECONDS=3600`、最多 `ARACHNE_JOB_MAX_STORED=100`。**进程重启丢失全部 jobs**（含 queued / running）。无 Redis、无 DB、无 webhook、无 `GET /jobs` 列表。
+
+`job_id` 为 `str(uuid.uuid4())`。
+
+**创建 `POST /jobs` → HTTP 202**
+
+```json
+{
+  "defaults": {
+    "headers": null,
+    "cookies": null,
+    "max_chars": null,
+    "session_id": null,
+    "ua_strategy": "default",
+    "render": false,
+    "site_profile": null
+  },
+  "items": [
+    {"url": "https://example.com"},
+    {"url": "https://example.com/other", "render": true}
+  ]
+}
+```
+
+- `items` 长度 `1..ARACHNE_JOB_MAX_URLS`（默认 50）；超出或空列表 → `bad_url`（400）
+- item 字段省略时继承 `defaults`（`url` 每条必填）
+- 创建**不**走全局 QPS；每条 item 执行时调用现有 `run_extract`（同一 limiter + 抽取 semaphore + 缓存 + profiles）
+- 响应：`{ "job_id", "status": "queued", "total" }`
+
+**查询 `GET /jobs/{id}`**
+
+任务状态：`queued` | `running` | `completed` | `cancelled`（终态只有后两者）。
+
+Item 状态：`pending` | `running` | `succeeded` | `failed` | `cancelled`。
+
+顶层计数：`total`、`succeeded_count`、`failed_count`、`cancelled_count`。
+
+- 成功 item：`result` 为完整 `ExtractResponse`
+- 失败 item：`result` 为与同步 API 相同的 `{ "error": { "code", "message", "detail" } }` 信封（例如 `bad_url` / `rate_limited` / `profile_invalid`）。单条失败**不**把 job 标为失败：其余跑完后 job 仍为 `completed`
+- 未知或已过期/驱逐的 id → `job_not_found`（HTTP 404）
+
+**取消 `POST /jobs/{id}/cancel`**
+
+- pending → `cancelled`，不再执行
+- 已 `running` 的 item 跑完并记录 succeeded/failed
+- 出现取消后 job 终态为 `cancelled`
+- 已是 `completed` / `cancelled` → 幂等 200，原终态不变
+- 未知 id → `job_not_found`（404）
+
+**执行**
+
+- 单 consumer：同一时刻跑一个 job
+- 每个 job 内 `asyncio.Semaphore(ARACHNE_JOB_CONCURRENCY)`，默认 3
+- 不复制抽取逻辑
+
+**轮询示例**
+
+```bash
+JOB=$(curl -s -X POST http://127.0.0.1:8000/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"items":[{"url":"https://example.com"},{"url":"https://example.com/x"}]}')
+JOB_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["job_id"])' <<<"$JOB")
+while true; do
+  BODY=$(curl -s "http://127.0.0.1:8000/jobs/$JOB_ID")
+  STATUS=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' <<<"$BODY")
+  echo "$STATUS"
+  case "$STATUS" in completed|cancelled) echo "$BODY"; break ;; esac
+  sleep 0.5
+done
+```
+
 ## 4. 架构
 
 ### 4.1 P3 同步流水线
@@ -281,15 +355,30 @@ Agent → FastAPI /extract
           → ExtractResponse JSON
 ```
 
-`/health` 与 `/stats` 不经过 QPS 与抽取信号量。
+`/health` 与 `/stats` 不经过 QPS 与抽取信号量。`POST /jobs` 创建本身也不经过 QPS；job item 调用 `run_extract` 时才计入。
+
+### 4.1.1 P4 批量流水线
+
+```
+Agent → POST /jobs（校验条数、写入内存 store、入队）→ 202 {job_id, queued, total}
+          → 单 consumer 出队
+          → job status=running
+          → 每条 item：job Semaphore(ARACHNE_JOB_CONCURRENCY)
+               → run_extract（QPS + cache + 抽取 Semaphore + profiles）
+               → succeeded: ExtractResponse
+                 failed: {error:{code,message,detail}}
+          → 全部终态 → completed；若曾 cancel → cancelled
+Agent → GET /jobs/{id} 轮询
+Agent → POST /jobs/{id}/cancel（pending 取消；running 收尾）
+```
 
 ### 4.2 模块划分
 
 ```
 app/
-  main.py            # 路由、lifespan、错误映射
+  main.py            # 路由、lifespan（启动/停止 job worker）、错误映射
   models.py          # Pydantic 请求/响应/Error/Stats
-  config.py          # 超时、UA、体积、并发、QPS、缓存、会话、重试、渲染超时、profiles 目录
+  config.py          # 超时、UA、体积、并发、QPS、缓存、会话、重试、渲染超时、profiles、jobs
   errors.py          # ArachneError 与 HTTP 映射
   ssrf.py            # getaddrinfo + 非公网地址拒绝
   fetch.py           # httpx 异步拉取（可选 headers/cookies）
@@ -303,6 +392,7 @@ app/
   antibot.py         # 重试、UA 池、挑战标记
   render.py          # 可选 Playwright（动态 import）
   profiles/          # P3 站点规则：schema / loader / apply
+  jobs/              # P4：models / store / worker / router
 scripts/
   write_session.py   # 离线写入 {id}.bin
 profiles/
@@ -313,7 +403,6 @@ profiles/
 
 ```
 app/
-  jobs/           # 队列与任务状态（P4）
   store/          # 结果与任务持久化（P5）
 ```
 
@@ -347,6 +436,7 @@ app/
 - 站点规则：`ARACHNE_PROFILES_DIR`（默认 `./data/profiles`，可为空）；热加载 debounce 1s
 - 重试：`ARACHNE_MAX_RETRIES=2`，`ARACHNE_RETRY_BACKOFF_SECONDS=0.5,1`
 - 渲染超时：`ARACHNE_RENDER_TIMEOUT=15`
+- 批量 jobs：`ARACHNE_JOB_MAX_URLS=50`、`ARACHNE_JOB_CONCURRENCY=3`、`ARACHNE_JOB_TTL_SECONDS=3600`、`ARACHNE_JOB_MAX_STORED=100`（内存 TTLCache；重启清空）
 
 ### 4.5 SSRF（P0，仍有效）
 
@@ -358,7 +448,7 @@ app/
 
 ### 4.6 可观测性
 
-抽取日志字段：`latency_ms`、`error_code`、`cache`（hit/miss）、`session`（指纹前缀）、`profile`（`id@version` 或 `-`）、`url`。禁止记录 Cookie / Authorization / cookies / 会话明文。重试只记录 `attempt` / `delay_s` / `error_code`。
+抽取日志字段：`latency_ms`、`error_code`、`cache`（hit/miss）、`session`（指纹前缀）、`profile`（`id@version` 或 `-`）、`url`。Job worker 另记 `job_id` / `total` / 终态。禁止记录 Cookie / Authorization / cookies / 会话明文。重试只记录 `attempt` / `delay_s` / `error_code`。
 
 ## 5. 实现分期（开发计划）
 
@@ -396,13 +486,17 @@ app/
 - [x] 同 host 冲突：字典序最大 `profile_id` 获胜 + warning
 - [x] 目录 mtime 热加载（debounce 1s）
 - [x] 响应 `profile_id` / `profile_version` / `profile_fallback`；缓存键含 `profile_id@version`
-- [x] **不做**：host glob、XPath、DB、远程拉取、profile 内 Python、队列（P4）、DB 持久化（P5）
+- [x] **不做**：host glob、XPath、DB、远程拉取、profile 内 Python
 
-### P4 — 批量队列
+### P4 — 批量队列（已实现）
 
-- [ ] `POST /jobs` 提交 URL 列表；`GET /jobs/{id}` 查状态与结果
-- [ ] 队列后端（如 Redis / 本地 asyncio 队列起步）
-- [ ] Agent 回调或轮询约定；单任务内并发与全局配额
+- [x] `POST /jobs` 提交 URL 列表（HTTP 202 `{job_id, status: queued, total}`）；`GET /jobs/{id}` 查状态、计数与 per-item 结果
+- [x] 进程内 `asyncio.Queue` + 单 consumer；每 job `ARACHNE_JOB_CONCURRENCY`（默认 3）；每条 item 复用 `run_extract`
+- [x] 创建不消耗全局 QPS；item 抽取消耗（现有 limiter + semaphore）
+- [x] `POST /jobs/{id}/cancel`：pending→cancelled；running 收尾；终态幂等 200
+- [x] 内存 TTL / max stored；未知或过期 id → `job_not_found`（404）
+- [x] 轮询约定；**无** list API、**无** webhook；单条失败 job 仍 `completed`
+- [x] **不做**：Redis/DB 持久化（P5）、跨进程队列、回调推送
 
 ### P5 — 持久化存储
 
@@ -429,25 +523,27 @@ flowchart LR
 | 登录态 / Cookie 抓取 | P1 注入 + P2 会话文件 | 调用方授权后注入或引用加密文件；非服务端代登破解 |
 | 反爬对抗 | P2 | 韧性与可观测，非攻击工具 |
 | 站点专用规则库 | P3 | 本地 JSON；非 DB |
-| 批量队列 | P4 | |
+| 批量队列 | P4 | 进程内队列 + 轮询；重启丢失 |
 | 持久化存储 | P5 | |
 | 「认证绕过」 | **不实现攻击型绕过** | 以受控会话 + 明确错误码替代 |
 
 ## 7. 与当前仓库状态
 
-- P3 已实现：`GET/POST /extract`；POST 可带会话注入、`session_id`、`ua_strategy`、`render`、`site_profile`
+- P4 已实现：同步 `/extract` 之外提供批量 `/jobs`；POST extract 可带会话注入、`session_id`、`ua_strategy`、`render`、`site_profile`
+- jobs 为进程内内存；重启、TTL 到期或超过 `ARACHNE_JOB_MAX_STORED` 后 id 变为 `job_not_found`
 - 运行时依赖钉死在 `requirements.txt`（`==`，含 `cachetools`、`cryptography`、`cssselect`）；Playwright 见 `requirements-playwright.txt`
 - 单元测试默认不访问网络、不需要浏览器；活测：`ARACHNE_INTEGRATION=1 pytest -m integration`
 
-## 8. 验收（P3）
+## 8. 验收（P4）
 
-1. `uvicorn app.main:app` 可在**未安装 Playwright** 时启动  
-2. 对公开 HTML 页请求 `/extract`，`title` 与 `main_text` 非空，含 `truncated` 与 profile 三字段  
-3. 非法 URL / 超时 / 非 HTML / 空抽取 / 超体积 / 超 QPS / 坏会话 / 坏 `site_profile` / 挑战页 / 无 Playwright 的 `render` 返回约定 `error.code`  
-4. POST `cookies` / `session_id` 进入上游请求；禁止头被剥离；GET 无会话、render、`site_profile` 字段  
-5. `GET /stats` 返回约定计数器；cache hit 不触发二次上游拉取；`render` / `ua_strategy` / `profile_id@version` 会拆缓存键  
-6. README 含会话写入、`ua_strategy`、`render`、Playwright 镜像、profiles 目录与 schema 说明  
-7. `pytest -m "not integration"` 通过（mock；不要求本机有浏览器）；profiles 覆盖 match / conflict / `profile_invalid` / strict / fallback / cache key
+1. `uvicorn app.main:app` 可在**未安装 Playwright** 时启动；OpenAPI version `0.5.0`  
+2. `POST /jobs` 返回 202 `{job_id, status: queued, total}`；`GET /jobs/{id}` 最终 `completed` 且成功 item 含完整 ExtractResponse  
+3. 部分 item 失败（如 `bad_url`）时 job 仍为 `completed`，失败 item 的 `result` 为 `{error:{code,message,detail}}`  
+4. `POST /jobs/{id}/cancel` 将 pending 标为 cancelled；running 收尾；对已终态 job 幂等 200  
+5. 未知 / 过期 id → `job_not_found`（404）；`items` 超过 `ARACHNE_JOB_MAX_URLS` → `bad_url`（400）  
+6. 打满同步 QPS 后 `POST /jobs` 仍为 202（创建不消耗 QPS）；item 执行走现有 limiter  
+7. README 含 jobs 契约、轮询示例、重启丢失说明  
+8. `pytest -m "not integration"` 通过（mock；不要求本机有浏览器）
 
 ---
 

@@ -1,10 +1,10 @@
 # arachne
 
-Synchronous **URL → structured JSON** extract service for AI agents.
+**URL → structured JSON** extract service for AI agents, with optional in-process batch jobs.
 
-P3 fetches HTML with `httpx` (optional headless Playwright) and extracts `title` / `main_text` / metadata / links. Optional JSON site profiles in `ARACHNE_PROFILES_DIR` override CSS title/main/meta. POST `/extract` may inject caller `cookies` / allowlisted `headers`, reference a Fernet-encrypted `session_id`, set `ua_strategy`, set `render`, or force `site_profile`. In-process QPS, concurrency, and a 60s TTL cache are on. Default install has **no** browsers, queue, Redis, or database.
+P4 fetches HTML with `httpx` (optional headless Playwright) and extracts `title` / `main_text` / metadata / links. Optional JSON site profiles in `ARACHNE_PROFILES_DIR` override CSS title/main/meta. POST `/extract` may inject caller `cookies` / allowlisted `headers`, reference a Fernet-encrypted `session_id`, set `ua_strategy`, set `render`, or force `site_profile`. `POST /jobs` queues many URLs and you poll `GET /jobs/{id}`. In-process QPS, concurrency, and a 60s TTL cache are on. Default install has **no** browsers, Redis, or database. **Restarting the process drops all jobs.**
 
-API contract version **0.4.0**.
+API contract version **0.5.0**.
 
 ## Install
 
@@ -49,6 +49,10 @@ export ARACHNE_MAX_RETRIES=2
 export ARACHNE_RETRY_BACKOFF_SECONDS=0.5,1
 export ARACHNE_RENDER_TIMEOUT=15
 export ARACHNE_PROFILES_DIR=./data/profiles
+export ARACHNE_JOB_MAX_URLS=50
+export ARACHNE_JOB_CONCURRENCY=3
+export ARACHNE_JOB_TTL_SECONDS=3600
+export ARACHNE_JOB_MAX_STORED=100
 uvicorn app.main:app
 ```
 
@@ -266,7 +270,59 @@ Timeouts and connection errors are retried (`ARACHNE_MAX_RETRIES=2`, backoff 0.5
 
 Agent client timeout should be slightly above the server read timeout (15s); **≥ 20s** is a reasonable default. Leave more room when `render=true`.
 
-Global extract QPS is a fixed 1-second window of 5 (override with `ARACHNE_QPS`). Cache misses (including Playwright) are also limited by `ARACHNE_MAX_CONCURRENCY` (default 10). `/health` and `/stats` are exempt.
+Global extract QPS is a fixed 1-second window of 5 (override with `ARACHNE_QPS`). Cache misses (including Playwright) are also limited by `ARACHNE_MAX_CONCURRENCY` (default 10). `/health`, `/stats`, and **creating** a job (`POST /jobs`) are exempt. Each job item still goes through `run_extract` and therefore the limiter.
+
+## Batch jobs
+
+Submit a list of URLs, then poll. There is **no** `GET /jobs` list and **no** webhooks. State lives in memory (`ARACHNE_JOB_TTL_SECONDS=3600`, `ARACHNE_JOB_MAX_STORED=100`). A process restart loses every job.
+
+`items` length is `1..ARACHNE_JOB_MAX_URLS` (default 50). Per-item fields inherit `defaults` when omitted. Each item calls the same `run_extract` path as `POST /extract` (QPS, cache, profiles, render). A job runs with `ARACHNE_JOB_CONCURRENCY` (default 3) item tasks at a time.
+
+Create (HTTP 202):
+
+```bash
+curl -X POST http://127.0.0.1:8000/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"defaults":{"ua_strategy":"default","render":false,"site_profile":null},"items":[{"url":"https://example.com"},{"url":"https://example.com/other","render":true}]}'
+```
+
+```json
+{"job_id":"3fa85f64-5717-4562-b3fc-2c963f66afa6","status":"queued","total":2}
+```
+
+Poll until `status` is `completed` or `cancelled`:
+
+```bash
+JOB_ID=3fa85f64-5717-4562-b3fc-2c963f66afa6
+curl "http://127.0.0.1:8000/jobs/$JOB_ID"
+```
+
+Job statuses: `queued` | `running` | `completed` | `cancelled`. Item statuses: `pending` | `running` | `succeeded` | `failed` | `cancelled`. Counts: `total`, `succeeded_count`, `failed_count`, `cancelled_count`. A succeeded item inlines a full extract body as `result`. A failed item uses the same error envelope as the sync API:
+
+```json
+{
+  "index": 1,
+  "url": "http://127.0.0.1/",
+  "status": "failed",
+  "result": {
+    "error": {
+      "code": "bad_url",
+      "message": "…",
+      "detail": {}
+    }
+  }
+}
+```
+
+One failed item does **not** fail the job: remaining items finish and the job is `completed`.
+
+Cancel pending items (`running` items finish and record a result). Already-terminal jobs return 200 with the same body:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/jobs/$JOB_ID/cancel"
+```
+
+Unknown or expired ids return `job_not_found` (404).
 
 ## Stats
 
@@ -310,6 +366,7 @@ Branch on `error.code`, not on `message`.
 | `challenge_detected` | 403 |
 | `unsupported_content`, `extract_empty`, `too_large` | 422 |
 | `rate_limited` | 429 |
+| `job_not_found` | 404 |
 | `timeout` | 504 |
 | `fetch_failed`, `unauthorized_upstream`, `render_failed` | 502 |
 | `render_unavailable` | 501 |
@@ -333,8 +390,11 @@ How the new P2/P3 codes are verified without a real site or browser:
 | `challenge_detected` | Mock httpx to return `tests/fixtures/challenge_cf.html` / `challenge_attention.html` as 200 or 403 (`tests/test_antibot.py`) |
 | `render_unavailable` | `monkeypatch` `app.render.playwright_available` to `False` and POST `"render": true` (`tests/test_render.py`) |
 | `profile_invalid` | POST `site_profile` with a missing id or illegal id (`tests/test_profiles.py`) |
+| `job_not_found` | `GET` or cancel an unknown / expired job id (`tests/test_jobs.py`) |
 
 `tests/test_profiles.py` also covers host match (including `www.`), lexicographic host conflicts, `strict` → `extract_empty`, `profile_fallback`, and cache keys that include `profile_id@version`.
+
+`tests/test_jobs.py` covers create 202, per-item failure still `completed`, cancel, `job_not_found`, max URLs, and that creating a job does not burn QPS.
 
 Live integration (fetches `https://example.com`):
 

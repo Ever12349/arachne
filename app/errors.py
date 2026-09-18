@@ -18,6 +18,7 @@ PROFILE_INVALID = "profile_invalid"
 CHALLENGE_DETECTED = "challenge_detected"
 RENDER_UNAVAILABLE = "render_unavailable"
 RENDER_FAILED = "render_failed"
+JOB_NOT_FOUND = "job_not_found"
 
 HTTP_STATUS: dict[str, int] = {
     BAD_URL: 400,
@@ -34,6 +35,7 @@ HTTP_STATUS: dict[str, int] = {
     RENDER_UNAVAILABLE: 501,
     RATE_LIMITED: 429,
     INTERNAL: 500,
+    JOB_NOT_FOUND: 404,
 }
 
 
@@ -101,3 +103,7 @@ def render_unavailable(message: str = "Playwright is not installed", detail: dic
 
 def render_failed(message: str = "Browser render failed", detail: dict[str, Any] | None = None) -> ArachneError:
     return ArachneError(RENDER_FAILED, message, detail)
+
+
+def job_not_found(message: str = "Job not found", detail: dict[str, Any] | None = None) -> ArachneError:
+    return ArachneError(JOB_NOT_FOUND, message, detail)
