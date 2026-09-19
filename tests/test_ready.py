@@ -29,7 +29,11 @@ def test_ready_db_failure_is_503(api_client: TestClient):
         async def __aexit__(self, *_args):
             return False
 
-    api_client.app.state.db_engine.connect = lambda: _FailingConnect()
+    class _FailingEngine:
+        def connect(self):
+            return _FailingConnect()
+
+    api_client.app.state.db_engine = _FailingEngine()
     response = api_client.get("/ready")
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "not_ready"
