@@ -22,12 +22,19 @@ JOB_NOT_FOUND = "job_not_found"
 LLM_UNAVAILABLE = "llm_unavailable"
 LLM_FAILED = "llm_failed"
 PROFILE_EXISTS = "profile_exists"
+UNAUTHORIZED = "unauthorized"
+FORBIDDEN = "forbidden"
+EGRESS_BLOCKED = "egress_blocked"
+NOT_READY = "not_ready"
 
 HTTP_STATUS: dict[str, int] = {
     BAD_URL: 400,
     SESSION_INVALID: 400,
     PROFILE_INVALID: 400,
     CHALLENGE_DETECTED: 403,
+    FORBIDDEN: 403,
+    EGRESS_BLOCKED: 403,
+    UNAUTHORIZED: 401,
     UNSUPPORTED_CONTENT: 422,
     EXTRACT_EMPTY: 422,
     TOO_LARGE: 422,
@@ -42,6 +49,7 @@ HTTP_STATUS: dict[str, int] = {
     INTERNAL: 500,
     JOB_NOT_FOUND: 404,
     PROFILE_EXISTS: 409,
+    NOT_READY: 503,
 }
 
 
@@ -125,3 +133,19 @@ def llm_failed(message: str = "LLM profile suggestion failed", detail: dict[str,
 
 def profile_exists(message: str = "Profile already exists", detail: dict[str, Any] | None = None) -> ArachneError:
     return ArachneError(PROFILE_EXISTS, message, detail)
+
+
+def unauthorized(message: str = "Missing or invalid API key", detail: dict[str, Any] | None = None) -> ArachneError:
+    return ArachneError(UNAUTHORIZED, message, detail)
+
+
+def forbidden(message: str = "Forbidden", detail: dict[str, Any] | None = None) -> ArachneError:
+    return ArachneError(FORBIDDEN, message, detail)
+
+
+def egress_blocked(message: str = "Host is not on the egress allowlist", detail: dict[str, Any] | None = None) -> ArachneError:
+    return ArachneError(EGRESS_BLOCKED, message, detail)
+
+
+def not_ready(message: str = "Service is not ready", detail: dict[str, Any] | None = None) -> ArachneError:
+    return ArachneError(NOT_READY, message, detail)

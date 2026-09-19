@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request
 
+from app import config
+from app.errors import forbidden
 from app.models import ErrorResponse
 from app.profiles.loader import ProfileRegistry
 from app.profiles.models import SuggestRequest, SuggestResponse, WriteProfileRequest, WriteProfileResponse
@@ -13,7 +15,8 @@ router = APIRouter(tags=["profiles"])
 
 PROFILE_ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
     400: {"model": ErrorResponse, "description": "bad_url | session_invalid | profile_invalid"},
-    403: {"model": ErrorResponse, "description": "challenge_detected"},
+    401: {"model": ErrorResponse, "description": "unauthorized"},
+    403: {"model": ErrorResponse, "description": "challenge_detected | forbidden | egress_blocked"},
     409: {"model": ErrorResponse, "description": "profile_exists"},
     422: {"model": ErrorResponse, "description": "unsupported_content | extract_empty | too_large"},
     429: {"model": ErrorResponse, "description": "rate_limited"},
@@ -54,9 +57,12 @@ async def suggest_profile(request: Request, body: SuggestRequest) -> SuggestResp
     response_model=WriteProfileResponse,
     responses={
         400: {"model": ErrorResponse, "description": "bad_url | profile_invalid"},
+        403: {"model": ErrorResponse, "description": "forbidden"},
         409: {"model": ErrorResponse, "description": "profile_exists"},
     },
 )
 async def write_profile(request: Request, body: WriteProfileRequest) -> WriteProfileResponse:
+    if not config.PROFILES_WRITE:
+        raise forbidden("Profile writes are disabled")
     saved = _registry(request).save_profile(body.profile, overwrite=body.overwrite)
     return WriteProfileResponse(profile=saved)

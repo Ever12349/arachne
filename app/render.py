@@ -26,7 +26,11 @@ async def render_url(
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
 ) -> FetchedPage:
-    """Headless Chromium goto(wait_until=domcontentloaded). SSRF-checks the URL first."""
+    """Headless Chromium goto(wait_until=domcontentloaded).
+
+    SSRF-checks the URL (scheme, public IP, egress allowlist) first. The browser
+    still connects by hostname — we do not pin-IP in Playwright.
+    """
     await assert_public_http_url(url)
     if not playwright_available():
         raise render_unavailable()

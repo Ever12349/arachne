@@ -98,6 +98,25 @@ def test_hand_authored_profile_does_not_need_suggest(api_client: TestClient):
     assert path.is_file()
 
 
+def test_write_disabled_is_forbidden_even_without_auth(api_client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("app.config.REQUIRE_AUTH", False)
+    monkeypatch.setattr("app.config.PROFILES_WRITE", False)
+    payload = _example_payload()
+    response = api_client.post("/profiles", json={"profile": payload})
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "forbidden"
+    registry_dir = Path(api_client.app.state.profile_registry._dir)
+    assert not (registry_dir / "example-com.json").exists()
+
+
+def test_write_enabled_succeeds_when_auth_off(api_client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("app.config.REQUIRE_AUTH", False)
+    monkeypatch.setattr("app.config.PROFILES_WRITE", True)
+    payload = _example_payload()
+    response = api_client.post("/profiles", json={"profile": payload})
+    assert response.status_code == 200, response.text
+
+
 def test_invalid_profile_schema_is_400(api_client: TestClient):
     response = api_client.post(
         "/profiles",

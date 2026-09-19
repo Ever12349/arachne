@@ -33,6 +33,10 @@ class JobWorker:
             return
         self._task = asyncio.create_task(self._loop(), name="arachne-job-worker")
 
+    def is_alive(self) -> bool:
+        task = self._task
+        return task is not None and not task.done()
+
     async def stop(self) -> None:
         task = self._task
         self._task = None

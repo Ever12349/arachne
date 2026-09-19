@@ -42,6 +42,20 @@ def _env_floats(name: str, default: list[float]) -> list[float]:
     return [float(p) for p in parts]
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes"}
+
+
+def _env_csv(name: str) -> tuple[str, ...]:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return ()
+    return tuple(part.strip() for part in str(raw).split(",") if part.strip())
+
+
 MAX_CONCURRENCY = _env_int("ARACHNE_MAX_CONCURRENCY", 10)
 QPS = _env_int("ARACHNE_QPS", 5)
 CACHE_TTL_SECONDS = _env_int("ARACHNE_CACHE_TTL_SECONDS", 60)
@@ -74,6 +88,18 @@ RENDER_TIMEOUT = _env_float("ARACHNE_RENDER_TIMEOUT", 15.0)
 
 JOB_MAX_URLS = _env_int("ARACHNE_JOB_MAX_URLS", 50)
 JOB_CONCURRENCY = _env_int("ARACHNE_JOB_CONCURRENCY", 3)
-# 0 = keep completed jobs forever; >0 deletes completed/cancelled rows older than TTL.
-JOB_DB_TTL_SECONDS = _env_int("ARACHNE_JOB_DB_TTL_SECONDS", 0)
+# 0 = keep completed jobs forever; default 7 days. >0 deletes completed/cancelled rows older than TTL.
+JOB_DB_TTL_SECONDS = _env_int("ARACHNE_JOB_DB_TTL_SECONDS", 604800)
 DATABASE_URL = os.environ.get("ARACHNE_DATABASE_URL", "sqlite+aiosqlite:///./data/arachne.db")
+
+# Optional API keys for a trusted single-instance / intranet sidecar. Not OAuth.
+API_KEYS = _env_csv("ARACHNE_API_KEYS")
+REQUIRE_AUTH = _env_bool("ARACHNE_REQUIRE_AUTH", False)
+METRICS_PUBLIC = _env_bool("ARACHNE_METRICS_PUBLIC", False)
+STATS_PUBLIC = _env_bool("ARACHNE_STATS_PUBLIC", False)
+PROFILES_WRITE = _env_bool("ARACHNE_PROFILES_WRITE", False)
+
+# Empty = disabled. Matched as host == suffix or host.endswith('.' + suffix).
+EGRESS_ALLOWLIST = _env_csv("ARACHNE_EGRESS_ALLOWLIST")
+
+LOG_JSON = _env_bool("ARACHNE_LOG_JSON", False)

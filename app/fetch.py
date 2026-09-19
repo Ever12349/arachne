@@ -15,6 +15,7 @@ from app.config import (
 )
 from app.errors import ArachneError, fetch_failed, timeout_error, too_large
 from app.ssrf import assert_public_http_url
+from app.transport import PinIPAsyncTransport
 
 HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})
 
@@ -43,6 +44,7 @@ async def ssrf_request_hook(request: httpx.Request) -> None:
 
 def create_http_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(
+        transport=PinIPAsyncTransport(),
         follow_redirects=True,
         max_redirects=MAX_REDIRECTS,
         timeout=HTTP_TIMEOUT,

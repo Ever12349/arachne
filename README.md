@@ -2,9 +2,11 @@
 
 **URL → structured JSON** extract service for AI agents, with optional SQLite-backed batch jobs.
 
-The service fetches HTML with `httpx` (optional headless Playwright) and extracts `title` / `main_text` / metadata / links. Optional JSON site profiles in `ARACHNE_PROFILES_DIR` override CSS title/main/meta. `POST /profiles/suggest` proposes a profile from a live page (no disk write); `POST /profiles` saves one. POST `/extract` may inject caller `cookies` / allowlisted `headers`, reference a Fernet-encrypted `session_id`, set `ua_strategy`, set `render`, or force `site_profile`. `POST /jobs` queues many URLs; poll `GET /jobs/{id}` (reads SQLite). Default install has **no** browsers, Redis, PostgreSQL, or webhooks. Job rows **survive process restart**; sessions stay Fernet files.
+The service fetches HTML with `httpx` (optional headless Playwright) and extracts `title` / `main_text` / metadata / links. Optional JSON site profiles in `ARACHNE_PROFILES_DIR` override CSS title/main/meta. `POST /profiles/suggest` proposes a profile from a live page (no disk write); `POST /profiles` saves one (requires `ARACHNE_PROFILES_WRITE=1`). POST `/extract` may inject caller `cookies` / allowlisted `headers`, reference a Fernet-encrypted `session_id`, set `ua_strategy`, set `render`, or force `site_profile`. `POST /jobs` queues many URLs; poll `GET /jobs/{id}` (reads SQLite). Default install has **no** browsers, Redis, PostgreSQL, or webhooks. Job rows **survive process restart**; sessions stay Fernet files.
 
-API contract version **0.7.0**.
+This is a **trusted single-instance / intranet sidecar**. Do not run multiple replicas (SQLite + in-process worker). Terminate TLS at a reverse proxy; the app speaks HTTP. Optional shared API keys are not OAuth and are not bound to a client.
+
+API contract version **0.8.0**.
 
 ## Install
 
@@ -58,9 +60,38 @@ export ARACHNE_SUGGEST_MIN_MAIN_CHARS=80
 export ARACHNE_JOB_MAX_URLS=50
 export ARACHNE_JOB_CONCURRENCY=3
 export ARACHNE_DATABASE_URL=sqlite+aiosqlite:///./data/arachne.db
-export ARACHNE_JOB_DB_TTL_SECONDS=0   # 0 = keep completed jobs forever
+export ARACHNE_JOB_DB_TTL_SECONDS=604800  # 7 days; 0 = keep completed jobs forever
+export ARACHNE_REQUIRE_AUTH=false
+export ARACHNE_API_KEYS=""               # comma-separated; required if REQUIRE_AUTH=true
+export ARACHNE_METRICS_PUBLIC=false      # /metrics anonymous only when REQUIRE_AUTH and this is true
+export ARACHNE_STATS_PUBLIC=false
+export ARACHNE_PROFILES_WRITE=false      # POST /profiles needs this even when auth is off
+export ARACHNE_EGRESS_ALLOWLIST=""       # comma-separated domain suffixes; empty = off
+export ARACHNE_LOG_JSON=false            # 1/true/yes → one JSON object per log line
 uvicorn app.main:app
 ```
+
+`ARACHNE_REQUIRE_AUTH=true` with an empty `ARACHNE_API_KEYS` **refuses to start**. Boolean env vars accept `1` / `true` / `yes` (case-insensitive).
+
+### API keys
+
+When `ARACHNE_REQUIRE_AUTH=true`, every route except `/health` and `/ready` needs a valid key. `/metrics` is anonymous only if `ARACHNE_METRICS_PUBLIC=1`; `/stats` only if `ARACHNE_STATS_PUBLIC=1`. Send either header:
+
+```bash
+export ARACHNE_REQUIRE_AUTH=true
+export ARACHNE_API_KEYS='key-one,key-two'
+curl -H 'Authorization: Bearer key-one' 'http://127.0.0.1:8000/extract?url=https://example.com'
+curl -H 'X-Arachne-Key: key-two' 'http://127.0.0.1:8000/stats'
+```
+
+When auth is off, Authorization / `X-Arachne-Key` are ignored (wrong keys still work as anonymous).
+
+### Ops warnings
+
+- **Single instance only.** SQLite and the in-process job worker are not safe behind a replica count > 1.
+- **TLS belongs on the reverse proxy.** This process stays HTTP.
+- **Profile writes are gated.** `POST /profiles` needs `ARACHNE_PROFILES_WRITE=1` even with auth off.
+- **Egress allowlist** (`ARACHNE_EGRESS_ALLOWLIST`) applies to crawl URLs only (extract / jobs / suggest / render), not `ARACHNE_LLM_BASE_URL`.
 
 ## Docker
 
@@ -102,10 +133,11 @@ docker compose build \
 docker compose up -d
 ```
 
-Health check:
+Health / ready:
 
 ```bash
 curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/ready
 ```
 
 Extract example:
@@ -234,6 +266,8 @@ curl -X POST http://127.0.0.1:8000/profiles/suggest \
 
 Validates the full P3 schema and writes `ARACHNE_PROFILES_DIR/{id}.json`. Hand-authored profiles are fine (no prior suggest). Global directory only — no per-client subdirs. After a successful write the in-memory registry reloads immediately.
 
+`POST /profiles` also requires `ARACHNE_PROFILES_WRITE=1` (default off), even when auth is disabled. Otherwise the response is `forbidden` (403).
+
 If `{id}.json` already exists and `overwrite` is not `true`, the response is `profile_exists` (409). Pass `"overwrite": true` to replace.
 
 ```bash
@@ -327,7 +361,7 @@ Timeouts and connection errors are retried (`ARACHNE_MAX_RETRIES=2`, backoff 0.5
 
 Agent client timeout should be slightly above the server read timeout (15s); **≥ 20s** is a reasonable default. Leave more room when `render=true`.
 
-Global extract QPS is a fixed 1-second window of 5 (override with `ARACHNE_QPS`). Cache misses (including Playwright) are also limited by `ARACHNE_MAX_CONCURRENCY` (default 10). `/health`, `/stats`, **creating** a job (`POST /jobs`), and `POST /profiles` (write) are exempt. `POST /profiles/suggest` **does** consume QPS and the extract semaphore. Each job item still goes through `run_extract` and therefore the limiter.
+Global extract QPS is a fixed 1-second window of 5 (override with `ARACHNE_QPS`). Cache misses (including Playwright) are also limited by `ARACHNE_MAX_CONCURRENCY` (default 10). `/health`, `/ready`, `/stats`, `/metrics`, **creating** a job (`POST /jobs`), and `POST /profiles` (write) are exempt. `POST /profiles/suggest` **does** consume QPS and the extract semaphore. Each job item still goes through `run_extract` and therefore the limiter.
 
 ## Batch jobs
 
@@ -335,7 +369,7 @@ Submit a list of URLs, then poll. There is **no** `GET /jobs` list and **no** we
 
 Optional header `X-Arachne-Client` sets `client_id` (default `"default"`). `GET /jobs/{id}`, `DELETE /jobs/{id}`, `GET /jobs/search`, and cancel only see that client's jobs. A mismatch returns `job_not_found` (404) so another tenant cannot probe ids.
 
-`ARACHNE_JOB_DB_TTL_SECONDS=0` keeps completed/cancelled jobs forever. A positive value deletes terminal jobs older than that many seconds.
+`ARACHNE_JOB_DB_TTL_SECONDS` defaults to `604800` (7 days). `0` keeps completed/cancelled jobs forever. A positive value deletes terminal jobs older than that many seconds.
 
 `items` length is `1..ARACHNE_JOB_MAX_URLS` (default 50). Per-item fields inherit `defaults` when omitted. Each item calls the same `run_extract` path as `POST /extract` (QPS, cache, profiles, render). A job runs with `ARACHNE_JOB_CONCURRENCY` (default 3) item tasks at a time.
 
@@ -398,10 +432,11 @@ curl -X DELETE "http://127.0.0.1:8000/jobs/$JOB_ID"
 
 Unknown ids or a different `X-Arachne-Client` return `job_not_found` (404).
 
-## Stats
+## Stats and metrics
 
 ```bash
 curl http://127.0.0.1:8000/stats
+curl http://127.0.0.1:8000/metrics
 ```
 
 ```json
@@ -438,7 +473,11 @@ Branch on `error.code`, not on `message`.
 | `session_invalid` | 400 |
 | `profile_invalid` | 400 |
 | `profile_exists` | 409 |
+| `unauthorized` | 401 |
+| `forbidden` | 403 |
+| `egress_blocked` | 403 |
 | `challenge_detected` | 403 |
+| `not_ready` | 503 |
 | `unsupported_content`, `extract_empty`, `too_large` | 422 |
 | `rate_limited` | 429 |
 | `job_not_found` | 404 |
@@ -447,7 +486,7 @@ Branch on `error.code`, not on `message`.
 | `render_unavailable`, `llm_unavailable` | 501 |
 | `internal` | 500 |
 
-Upstream 401/403 become `unauthorized_upstream` unless the body looks like a challenge (`challenge_detected`). Other `status >= 400` become `fetch_failed`. Both include `detail.status_code`. Only `http`/`https` URLs are accepted; private, loopback, link-local, and unspecified addresses are rejected as `bad_url`. Cookie / Authorization / session plaintext is never written to logs.
+Upstream 401/403 become `unauthorized_upstream` unless the body looks like a challenge (`challenge_detected`). Other `status >= 400` become `fetch_failed`. Both include `detail.status_code`. Only `http`/`https` URLs are accepted; private, loopback, link-local, and unspecified addresses are rejected as `bad_url`. Optional `ARACHNE_EGRESS_ALLOWLIST` rejects other crawl hosts as `egress_blocked`. Cookie / Authorization / session plaintext is never written to logs. Set `X-Request-Id` to correlate a request; the value is echoed on the response.
 
 ## Tests
 
@@ -470,7 +509,7 @@ How the new P2/P3 codes are verified without a real site or browser:
 | `llm_failed` | Mock LLM selectors that fail lxml self-test with `"strategy":"llm"` (`tests/test_profiles_suggest.py`) |
 | `job_not_found` | `GET` or cancel an unknown / expired job id (`tests/test_jobs.py`) |
 
-`tests/test_jobs.py` covers create / poll / cancel / per-item errors / QPS. `tests/test_jobs_persistence.py` covers SQLite reopen, URL search, delete, `X-Arachne-Client` isolation, and TTL cleanup. `tests/test_profiles_suggest.py` covers heuristic suggest, `llm_unavailable`, mocked LLM verify/fail, auto fallback, and that suggest does not write disk. `tests/test_profiles_write.py` covers 409 / overwrite / hot-reload after write.
+`tests/test_jobs.py` covers create / poll / cancel / per-item errors / QPS. `tests/test_jobs_persistence.py` covers SQLite reopen, URL search, delete, `X-Arachne-Client` isolation, and TTL cleanup. `tests/test_profiles_suggest.py` covers heuristic suggest, `llm_unavailable`, mocked LLM verify/fail, auto fallback, and that suggest does not write disk. `tests/test_profiles_write.py` covers 409 / overwrite / hot-reload after write and the `ARACHNE_PROFILES_WRITE` gate. `tests/test_auth.py`, `tests/test_ready.py`, `tests/test_egress.py`, and `tests/test_transport.py` cover P7a auth, readiness, allowlist, and pin-IP.
 
 `tests/test_jobs.py` covers create 202, per-item failure still `completed`, cancel, `job_not_found`, max URLs, and that creating a job does not burn QPS.
 
@@ -484,6 +523,9 @@ ARACHNE_INTEGRATION=1 pytest -m integration
 
 ```bash
 curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/ready
 ```
 
-Design notes (SSRF, pipeline, roadmap): [docs/DESIGN.md](docs/DESIGN.md).
+`/health` is liveness (`{status: ok}`). `/ready` checks SQLite (`SELECT 1`) and that the job worker task is still running; failure is `not_ready` (503).
+
+Design notes (SSRF, pin-IP, pipeline, roadmap): [docs/DESIGN.md](docs/DESIGN.md).

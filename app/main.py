@@ -1,28 +1,31 @@
-"""Arachne P6: URL → structured JSON extract, with persisted jobs and profile suggest."""
+"""Arachne P7: URL → structured JSON extract, with single-instance production hardening."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 
 import httpx
-from fastapi import Depends, FastAPI, Query, Request
+from fastapi import Depends, FastAPI, Query, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 
 from app import config
+from app.auth import assert_auth_configured, enforce_auth
 from app.cache import ResultCache
 from app.db import create_db_engine, init_db, session_factory
-from app.errors import ArachneError, http_status_for
+from app.errors import ArachneError, http_status_for, not_ready
 from app.fetch import create_http_client
 from app.jobs.router import router as jobs_router
 from app.jobs.store import JobStore
 from app.jobs.worker import JobWorker
 from app.limits import FixedWindowRateLimiter, Stats, extract_semaphore
-from app.logging_setup import setup_logging
+from app.logging_setup import REQUEST_ID_HEADER, request_id_var, resolve_request_id, setup_logging
+from app.metrics import METRICS_CONTENT_TYPE, render_metrics
 from app.models import ErrorResponse, ExtractRequest, ExtractResponse, StatsResponse
 from app.profiles.loader import ProfileRegistry
 from app.profiles.router import router as profiles_router
@@ -33,7 +36,8 @@ logger = logging.getLogger("arachne")
 
 ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
     400: {"model": ErrorResponse, "description": "bad_url | session_invalid | profile_invalid"},
-    403: {"model": ErrorResponse, "description": "challenge_detected"},
+    401: {"model": ErrorResponse, "description": "unauthorized"},
+    403: {"model": ErrorResponse, "description": "challenge_detected | forbidden | egress_blocked"},
     409: {"model": ErrorResponse, "description": "profile_exists"},
     422: {"model": ErrorResponse, "description": "unsupported_content | extract_empty | too_large"},
     429: {"model": ErrorResponse, "description": "rate_limited"},
@@ -41,12 +45,14 @@ ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
     500: {"model": ErrorResponse, "description": "internal"},
     501: {"model": ErrorResponse, "description": "render_unavailable | llm_unavailable"},
     502: {"model": ErrorResponse, "description": "fetch_failed | unauthorized_upstream | render_failed | llm_failed"},
+    503: {"model": ErrorResponse, "description": "not_ready"},
     504: {"model": ErrorResponse, "description": "timeout"},
 }
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    assert_auth_configured()
     engine = create_db_engine()
     await init_db(engine)
     app.state.db_engine = engine
@@ -81,10 +87,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="arachne",
-    version="0.7.0",
-    description="URL → structured JSON extract for AI agents, with SQLite-backed batch jobs and profile suggest.",
+    version="0.8.0",
+    description=(
+        "URL → structured JSON extract for AI agents. Single-instance intranet sidecar "
+        "with optional API-key auth, SQLite-backed batch jobs, and profile suggest."
+    ),
     lifespan=lifespan,
+    dependencies=[Depends(enforce_auth)],
 )
+
+
+@app.middleware("http")
+async def request_id_middleware(
+    request: Request,
+    call_next: Callable[[Request], Awaitable[Response]],
+) -> Response:
+    request_id = resolve_request_id(request.headers.get(REQUEST_ID_HEADER))
+    token = request_id_var.set(request_id)
+    try:
+        response = await call_next(request)
+    finally:
+        request_id_var.reset(token)
+    response.headers[REQUEST_ID_HEADER] = request_id
+    return response
 
 
 def get_http_client(request: Request) -> httpx.AsyncClient:
@@ -124,9 +149,37 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+async def _assert_ready(request: Request) -> None:
+    worker = getattr(request.app.state, "job_worker", None)
+    if worker is None or not worker.is_alive():
+        raise not_ready("Job worker is not running")
+    engine = getattr(request.app.state, "db_engine", None)
+    if engine is None:
+        raise not_ready("Database is not ready")
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+    except Exception as exc:
+        raise not_ready("Database is not ready") from exc
+
+
+@app.get(
+    "/ready",
+    responses={503: {"model": ErrorResponse, "description": "not_ready"}},
+)
+async def ready(request: Request) -> dict[str, str]:
+    await _assert_ready(request)
+    return {"status": "ok"}
+
+
 @app.get("/stats", response_model=StatsResponse)
 async def stats(request: Request) -> StatsResponse:
     return StatsResponse.model_validate(request.app.state.stats.snapshot())
+
+
+@app.get("/metrics")
+async def metrics() -> Response:
+    return Response(content=render_metrics(), media_type=METRICS_CONTENT_TYPE)
 
 
 async def _run_extract(

@@ -1,9 +1,8 @@
 """SSRF guards: only public http(s) URLs, resolved before fetch.
 
-We resolve with getaddrinfo and reject private/loopback/link-local/unspecified
-addresses, then the HTTP client still connects by the original hostname (needed
-for TLS and virtual hosts). That leaves a DNS-rebinding window between check
-and connect; see docs/DESIGN.md.
+httpx connects via PinIPAsyncTransport (TCP to the resolved public IP, TLS
+server_hostname = original host). Playwright still navigates by hostname, so
+the render path keeps a DNS-rebinding window; see docs/DESIGN.md.
 """
 
 from __future__ import annotations
@@ -79,8 +78,11 @@ async def resolve_host_ips(host: str, port: int) -> list[str]:
 
 
 async def assert_public_http_url(url: str) -> None:
-    """Validate scheme and reject URLs whose resolved addresses are not public."""
+    """Validate scheme, optional egress allowlist, and reject non-public addresses."""
+    from app.egress import assert_egress_allowed
+
     _scheme, host, port = parse_http_url(url)
+    assert_egress_allowed(host)
     ips = await resolve_host_ips(host, port)
     blocked = [ip for ip in ips if is_blocked_ip(ip)]
     if blocked:

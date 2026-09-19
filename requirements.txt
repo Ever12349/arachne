@@ -8,3 +8,4 @@ cachetools==5.5.2
 cryptography==45.0.7
 sqlalchemy==2.0.52
 aiosqlite==0.22.1
+prometheus-client==0.26.0

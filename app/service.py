@@ -146,7 +146,7 @@ async def run_extract(
 ) -> ExtractResponse:
     """QPS → cache lookup → (miss) semaphore → fetch or render / extract → store → max_chars."""
     t0 = time.perf_counter()
-    stats.requests_total += 1
+    stats.record_request()
     error_code: str | None = None
     cache_status: str | None = None
     session_prefix = "-"
@@ -156,8 +156,7 @@ async def run_extract(
 
     def finish_log() -> None:
         latency_ms = (time.perf_counter() - t0) * 1000.0
-        stats.latency_ms_sum += latency_ms
-        stats.latency_ms_count += 1
+        stats.record_latency(latency_ms)
         _log_extract(
             url=requested,
             cache_status=cache_status,
@@ -184,7 +183,7 @@ async def run_extract(
         if not await limiter.try_acquire():
             raise rate_limited()
 
-        stats.in_flight += 1
+        stats.enter_in_flight()
         entered_inflight = True
         key = cache_key(
             requested,
@@ -198,11 +197,11 @@ async def run_extract(
         cached = await cache.get(key)
         if cached is not None:
             cache_status = "hit"
-            stats.cache_hits += 1
+            stats.record_cache_hit()
             return apply_max_chars(cached, max_chars)
 
         cache_status = "miss"
-        stats.cache_misses += 1
+        stats.record_cache_miss()
         upstream_headers = headers_for_upstream(safe_headers, strategy)
         async with semaphore:
             result = await extract_page(
@@ -218,16 +217,16 @@ async def run_extract(
         return apply_max_chars(result, max_chars)
     except ArachneError as exc:
         error_code = exc.code
-        stats.errors_by_code[exc.code] += 1
+        stats.record_error(exc.code)
         raise
     except Exception:
         error_code = INTERNAL
-        stats.errors_by_code[INTERNAL] += 1
+        stats.record_error(INTERNAL)
         logger.exception("unhandled extract error")
         raise ArachneError(INTERNAL, "Internal server error") from None
     finally:
         if entered_inflight:
-            stats.in_flight -= 1
+            stats.leave_in_flight()
         finish_log()
 
 
@@ -264,7 +263,7 @@ async def run_suggest(
 ) -> SuggestResponse:
     """QPS → semaphore fetch/render → heuristic/LLM suggest. No cache, no disk write."""
     t0 = time.perf_counter()
-    stats.requests_total += 1
+    stats.record_request()
     error_code: str | None = None
     session_prefix = "-"
     requested = (url or "").strip()
@@ -282,7 +281,7 @@ async def run_suggest(
         if not await limiter.try_acquire():
             raise rate_limited()
 
-        stats.in_flight += 1
+        stats.enter_in_flight()
         entered_inflight = True
         upstream_headers = headers_for_upstream(safe_headers, "default")
         async with semaphore:
@@ -298,19 +297,18 @@ async def run_suggest(
         return result
     except ArachneError as exc:
         error_code = exc.code
-        stats.errors_by_code[exc.code] += 1
+        stats.record_error(exc.code)
         raise
     except Exception:
         error_code = INTERNAL
-        stats.errors_by_code[INTERNAL] += 1
+        stats.record_error(INTERNAL)
         logger.exception("unhandled suggest error")
         raise ArachneError(INTERNAL, "Internal server error") from None
     finally:
         if entered_inflight:
-            stats.in_flight -= 1
+            stats.leave_in_flight()
         latency_ms = (time.perf_counter() - t0) * 1000.0
-        stats.latency_ms_sum += latency_ms
-        stats.latency_ms_count += 1
+        stats.record_latency(latency_ms)
         _log_suggest(
             url=requested,
             strategy=used_strategy,

@@ -17,6 +17,34 @@ def test_health(api_client: TestClient):
     assert response.json() == {"status": "ok"}
 
 
+def test_openapi_version(api_client: TestClient):
+    spec = api_client.get("/openapi.json").json()
+    assert spec["info"]["version"] == "0.8.0"
+
+
+def test_request_id_generated_and_echoed(api_client: TestClient):
+    response = api_client.get("/health")
+    assert response.headers.get("X-Request-Id")
+    echoed = api_client.get("/health", headers={"X-Request-Id": "client-rid-1"})
+    assert echoed.headers.get("X-Request-Id") == "client-rid-1"
+
+
+def test_metrics_lists_expected_series(api_client: TestClient):
+    extract = api_client.get("/extract", params={"url": "https://example.com/"})
+    assert extract.status_code == 200
+    assert api_client.post("/extract", json={"url": "http://127.0.0.1/"}).status_code == 400
+    body = api_client.get("/metrics").text
+    for name in (
+        "arachne_requests_total",
+        "arachne_errors_total",
+        "arachne_in_flight",
+        "arachne_cache_hits_total",
+        "arachne_cache_misses_total",
+        "arachne_request_latency_seconds",
+    ):
+        assert name in body
+
+
 def test_stats_shape_before_extracts(api_client: TestClient):
     response = api_client.get("/stats")
     assert response.status_code == 200

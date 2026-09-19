@@ -100,6 +100,18 @@ def _isolated_job_db(tmp_path, monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture(autouse=True)
+def _p7_safe_defaults(monkeypatch: pytest.MonkeyPatch):
+    """Keep existing tests anonymous; allow profile writes unless a test opts out."""
+    monkeypatch.setattr("app.config.REQUIRE_AUTH", False)
+    monkeypatch.setattr("app.config.API_KEYS", ())
+    monkeypatch.setattr("app.config.METRICS_PUBLIC", False)
+    monkeypatch.setattr("app.config.STATS_PUBLIC", False)
+    monkeypatch.setattr("app.config.PROFILES_WRITE", True)
+    monkeypatch.setattr("app.config.EGRESS_ALLOWLIST", ())
+    monkeypatch.setattr("app.config.LOG_JSON", False)
+
+
+@pytest.fixture(autouse=True)
 def _fast_retry_backoff(monkeypatch: pytest.MonkeyPatch):
     """Unit tests should not wait on real retry sleeps."""
 

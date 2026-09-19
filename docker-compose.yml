@@ -1,3 +1,6 @@
+# Single-instance sidecar only (SQLite + in-process job worker). Do not scale replicas.
+# Terminate TLS at a reverse proxy in front; this container speaks HTTP.
+# Production intranet: set ARACHNE_REQUIRE_AUTH=true and ARACHNE_API_KEYS=...
 services:
   arachne:
     build: .
