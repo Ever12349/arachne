@@ -9,7 +9,7 @@ from lxml import html as lxml_html
 from lxml.etree import ParseError
 
 from app.errors import extract_empty
-from app.extract import _clean, _html_lang, _meta_map, collect_links, extract_html
+from app.extract import _clean, _html_lang, _meta_map, collect_images, collect_links, extract_html
 from app.models import ExtractResponse, OgMetadata, PageMetadata
 from app.profiles.schema import SiteProfile
 
@@ -105,12 +105,14 @@ def _profile_success_response(
     final_url: str,
     status_code: int,
     content_type: str,
+    main_el: lxml_html.HtmlElement | None = None,
 ) -> ExtractResponse:
     description, og = _meta_map(tree)
     if og.image:
         og = og.model_copy(update={"image": urljoin(final_url, og.image)})
     language = _html_lang(tree)
     links = [] if profile.disable_links else collect_links(tree, final_url)
+    images = collect_images(tree, final_url, main_el=main_el)
     metadata = PageMetadata(
         description=_clean(description) or _clean(og.description),
         language=language,
@@ -130,6 +132,7 @@ def _profile_success_response(
         main_text=main_text,
         metadata=metadata,
         links=links,
+        images=images,
         truncated=False,
         profile_id=profile.id,
         profile_version=profile.version,
@@ -166,10 +169,11 @@ def extract_with_profile(
             title = _clean(el.text_content())
 
     main_text = ""
+    main_el = None
     if (profile.main_selector or "").strip():
-        el = _css_first(tree, profile.main_selector)
-        if el is not None:
-            main_text = _clean(el.text_content())
+        main_el = _css_first(tree, profile.main_selector)
+        if main_el is not None:
+            main_text = _clean(main_el.text_content())
 
     if title or main_text:
         return _profile_success_response(
@@ -181,6 +185,7 @@ def extract_with_profile(
             final_url=final_url,
             status_code=status_code,
             content_type=content_type,
+            main_el=main_el,
         )
 
     if profile.strict:

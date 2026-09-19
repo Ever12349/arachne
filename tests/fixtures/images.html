@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>Images Page Title</title>
+  <meta name="description" content="Images fixture.">
+  <meta property="og:title" content="OG Title">
+  <meta property="og:description" content="OG Description">
+  <meta property="og:image" content="/images/og.png">
+</head>
+<body>
+  <header>
+    <img src="/chrome/logo.png" alt="Site logo">
+  </header>
+  <nav>
+    <img src="https://tracker.example/nav.gif" width="1" height="1" alt="nav tracker">
+  </nav>
+  <article>
+    <h1>Images Page Title</h1>
+    <p>This is the main article text used by image extract unit tests. It is unique enough for trafilatura.</p>
+    <img src="/photos/hero.jpg" alt="Hero photo">
+    <img src="pics/inline.png" alt="Inline">
+    <img src="https://cdn.example.com/a.jpg" alt="CDN">
+    <img src="/photos/hero.jpg" alt="Hero duplicate">
+    <img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="embedded">
+    <img src="" alt="empty src">
+    <img alt="missing src">
+    <img src="/tracker/tiny.gif" width="1" height="1" alt="tracker">
+    <img src="/tracker/short.gif" height="2" alt="short height">
+    <img src="https://cdn.example.com/a.jpg" alt="CDN again">
+  </article>
+  <footer>
+    <img src="/chrome/footer.png" alt="Footer badge">
+  </footer>
+</body>
+</html>

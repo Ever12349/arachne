@@ -16,6 +16,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 SAMPLE_HTML = (FIXTURES / "sample.html").read_text(encoding="utf-8")
 EMPTY_HTML = (FIXTURES / "empty.html").read_text(encoding="utf-8")
 ARTICLE_PROFILE_HTML = (FIXTURES / "article_profile.html").read_text(encoding="utf-8")
+IMAGES_HTML = (FIXTURES / "images.html").read_text(encoding="utf-8")
 CHALLENGE_CF_HTML = (FIXTURES / "challenge_cf.html").read_text(encoding="utf-8")
 CHALLENGE_ATTENTION_HTML = (FIXTURES / "challenge_attention.html").read_text(encoding="utf-8")
 

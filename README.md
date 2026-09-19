@@ -2,11 +2,11 @@
 
 **URL → structured JSON** extract service for AI agents, with optional SQLite-backed batch jobs.
 
-The service fetches HTML with `httpx` (optional headless Playwright) and extracts `title` / `main_text` / metadata / links. Optional JSON site profiles in `ARACHNE_PROFILES_DIR` override CSS title/main/meta. `POST /profiles/suggest` proposes a profile from a live page (no disk write); `POST /profiles` saves one (requires `ARACHNE_PROFILES_WRITE=1`). POST `/extract` may inject caller `cookies` / allowlisted `headers`, reference a Fernet-encrypted `session_id`, set `ua_strategy`, set `render`, or force `site_profile`. `POST /jobs` queues many URLs; poll `GET /jobs/{id}` (reads SQLite). Default install has **no** browsers, Redis, PostgreSQL, or webhooks. Job rows **survive process restart**; sessions stay Fernet files.
+The service fetches HTML with `httpx` (optional headless Playwright) and extracts `title` / `main_text` / metadata / links / content-area `images`. Optional JSON site profiles in `ARACHNE_PROFILES_DIR` override CSS title/main/meta. `POST /profiles/suggest` proposes a profile from a live page (no disk write); `POST /profiles` saves one (requires `ARACHNE_PROFILES_WRITE=1`). POST `/extract` may inject caller `cookies` / allowlisted `headers`, reference a Fernet-encrypted `session_id`, set `ua_strategy`, set `render`, or force `site_profile`. `POST /jobs` queues many URLs; poll `GET /jobs/{id}` (reads SQLite). Default install has **no** browsers, Redis, PostgreSQL, or webhooks. Job rows **survive process restart**; sessions stay Fernet files.
 
 This is a **trusted single-instance / intranet sidecar**. Do not run multiple replicas (SQLite + in-process worker). Terminate TLS at a reverse proxy; the app speaks HTTP. Optional shared API keys are not OAuth and are not bound to a client.
 
-API contract version **0.8.0**.
+API contract version **0.8.1**.
 
 ## Install
 
@@ -57,6 +57,7 @@ export ARACHNE_LLM_MODEL=gpt-4o-mini
 export ARACHNE_LLM_TIMEOUT=30
 export ARACHNE_SUGGEST_MIN_TITLE_CHARS=2
 export ARACHNE_SUGGEST_MIN_MAIN_CHARS=80
+export ARACHNE_MAX_IMAGES=10
 export ARACHNE_JOB_MAX_URLS=50
 export ARACHNE_JOB_CONCURRENCY=3
 export ARACHNE_DATABASE_URL=sqlite+aiosqlite:///./data/arachne.db
@@ -344,6 +345,9 @@ Success (200):
   "links": [
     {"href": "https://www.iana.org/domains/example", "text": "More information..."}
   ],
+  "images": [
+    {"url": "https://example.com/photo.jpg", "alt": "A photo"}
+  ],
   "truncated": false,
   "profile_id": "",
   "profile_version": "",
@@ -352,6 +356,10 @@ Success (200):
 ```
 
 `url` is the final URL after redirects. `requested_url` is what the caller sent. Metadata string fields default to `""`. `links` are absolute `http`/`https` anchors, same-host first (leading `www.` ignored), capped at 50. Bare `#` fragments, `tel:`, `javascript:`, `mailto:`, and non-http(s) hrefs are skipped. Link text is capped at 200 characters.
+
+`images` are `<img>` tags from the **content region only** (not page chrome). If a site profile `main_selector` hits, that subtree is scanned; otherwise `<article>`, then `<main>`, then `body`. Each `url` is resolved to absolute `http`/`https` against the page final URL. `data:`, empty/missing `src`, and obvious tracking pixels (`width` or `height` ≤ 2, or both dimensions look like 1×1) are skipped. `alt` comes from `img[alt]` or `""`. Results are de-duplicated by final URL and capped by `ARACHNE_MAX_IMAGES` (default 10). No qualifying images → `images: []`; extract still succeeds.
+
+`metadata.og.image` is unchanged and is **not** copied or merged into `images`. Use `metadata.og.image` for the Open Graph cover; use `images` for in-content figures.
 
 `main_text` is hard-capped at 100_000 characters. If you pass `max_chars`, it is clamped to `[1, 100000]` and `main_text` is cut to that length. `truncated` is `true` only when text was cut. There is no `cached` field on the success body; cache hits are counted in logs and `/stats` only. Cache keys include the merged session fingerprint, `render`, `ua_strategy`, and `profile_id@version`.
 
@@ -509,7 +517,7 @@ How the new P2/P3 codes are verified without a real site or browser:
 | `llm_failed` | Mock LLM selectors that fail lxml self-test with `"strategy":"llm"` (`tests/test_profiles_suggest.py`) |
 | `job_not_found` | `GET` or cancel an unknown / expired job id (`tests/test_jobs.py`) |
 
-`tests/test_jobs.py` covers create / poll / cancel / per-item errors / QPS. `tests/test_jobs_persistence.py` covers SQLite reopen, URL search, delete, `X-Arachne-Client` isolation, and TTL cleanup. `tests/test_profiles_suggest.py` covers heuristic suggest, `llm_unavailable`, mocked LLM verify/fail, auto fallback, and that suggest does not write disk. `tests/test_profiles_write.py` covers 409 / overwrite / hot-reload after write and the `ARACHNE_PROFILES_WRITE` gate. `tests/test_auth.py`, `tests/test_ready.py`, `tests/test_egress.py`, and `tests/test_transport.py` cover P7a auth, readiness, allowlist, and pin-IP.
+`tests/test_extract.py` covers content-area `images` (relative→absolute, tracker skip, dedupe/cap, empty list, `og.image` not merged). `tests/test_jobs.py` covers create / poll / cancel / per-item errors / QPS. `tests/test_jobs_persistence.py` covers SQLite reopen, URL search, delete, `X-Arachne-Client` isolation, and TTL cleanup. `tests/test_profiles_suggest.py` covers heuristic suggest, `llm_unavailable`, mocked LLM verify/fail, auto fallback, and that suggest does not write disk. `tests/test_profiles_write.py` covers 409 / overwrite / hot-reload after write and the `ARACHNE_PROFILES_WRITE` gate. `tests/test_auth.py`, `tests/test_ready.py`, `tests/test_egress.py`, and `tests/test_transport.py` cover P7a auth, readiness, allowlist, and pin-IP.
 
 `tests/test_jobs.py` covers create 202, per-item failure still `completed`, cancel, `job_not_found`, max URLs, and that creating a job does not burn QPS.
 

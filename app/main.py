@@ -87,7 +87,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="arachne",
-    version="0.8.0",
+    version="0.8.1",
     description=(
         "URL → structured JSON extract for AI agents. Single-instance intranet sidecar "
         "with optional API-key auth, SQLite-backed batch jobs, and profile suggest."

@@ -19,7 +19,7 @@ def test_health(api_client: TestClient):
 
 def test_openapi_version(api_client: TestClient):
     spec = api_client.get("/openapi.json").json()
-    assert spec["info"]["version"] == "0.8.0"
+    assert spec["info"]["version"] == "0.8.1"
 
 
 def test_request_id_generated_and_echoed(api_client: TestClient):
@@ -79,6 +79,8 @@ def test_get_extract_success(api_client: TestClient):
     if data["links"]:
         assert "href" in data["links"][0]
         assert "text" in data["links"][0]
+    assert data["images"] == []
+    assert data["metadata"]["og"]["image"] == "https://www.example.com/images/og.png"
 
 
 def test_post_extract_success(api_client: TestClient):

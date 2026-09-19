@@ -59,6 +59,7 @@ def test_create_job_returns_202(api_client: TestClient):
     assert item["status"] == "succeeded"
     assert item["result"]["title"]
     assert "error" not in item["result"]
+    assert isinstance(item["result"]["images"], list)
 
 
 def test_per_item_failure_job_still_completed(api_client: TestClient):

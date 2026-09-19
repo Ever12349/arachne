@@ -1,16 +1,19 @@
-"""HTML → title, main_text, metadata, links (trafilatura + full-page lxml <a> scan)."""
+"""HTML → title, main_text, metadata, links, images (trafilatura + lxml scans)."""
 
 from __future__ import annotations
 
+import re
 from urllib.parse import urljoin, urlparse
 
 import trafilatura
 from lxml import html as lxml_html
 
-from app.config import LINK_TEXT_MAX_CHARS, MAIN_TEXT_MAX_CHARS, MAX_LINKS
+from app.config import LINK_TEXT_MAX_CHARS, MAIN_TEXT_MAX_CHARS, MAX_IMAGES, MAX_LINKS
 from app.errors import extract_empty
-from app.models import ExtractResponse, Link, OgMetadata, PageMetadata
+from app.models import ExtractResponse, ImageItem, Link, OgMetadata, PageMetadata
 from app.ssrf import normalize_host
+
+_DIM_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(?:px)?\s*$", re.IGNORECASE)
 
 
 def _clean(value: str | None) -> str:
@@ -101,6 +104,77 @@ def collect_links(tree: lxml_html.HtmlElement, base_url: str, limit: int = MAX_L
     return (same_host + other)[:limit]
 
 
+def _content_region(
+    tree: lxml_html.HtmlElement,
+    main_el: lxml_html.HtmlElement | None = None,
+) -> lxml_html.HtmlElement:
+    """Prefer a profile main subtree, else <article>, <main>, then <body>."""
+    if main_el is not None:
+        return main_el
+    for xpath in (".//article", ".//main", ".//body"):
+        matches = tree.xpath(xpath)
+        if matches:
+            return matches[0]
+    return tree
+
+
+def _parse_dimension(raw: str | None) -> float | None:
+    if raw is None:
+        return None
+    match = _DIM_RE.match(raw)
+    if not match:
+        return None
+    return float(match.group(1))
+
+
+def _is_tracking_pixel(el: lxml_html.HtmlElement) -> bool:
+    width = _parse_dimension(el.get("width"))
+    height = _parse_dimension(el.get("height"))
+    if width is not None and width <= 2:
+        return True
+    if height is not None and height <= 2:
+        return True
+    return width == 1 and height == 1
+
+
+def _absolute_http_url(raw: str, base_url: str) -> str | None:
+    text = (raw or "").strip()
+    if not text or text.lower().startswith("data:"):
+        return None
+    absolute = urljoin(base_url, text)
+    parsed = urlparse(absolute)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return absolute
+
+
+def collect_images(
+    tree: lxml_html.HtmlElement,
+    base_url: str,
+    *,
+    main_el: lxml_html.HtmlElement | None = None,
+    limit: int | None = None,
+) -> list[ImageItem]:
+    """Content-region <img> list; absolute http(s); skip trackers; cap `limit`."""
+    cap = MAX_IMAGES if limit is None else int(limit)
+    if cap <= 0:
+        return []
+
+    region = _content_region(tree, main_el)
+    seen: set[str] = set()
+    images: list[ImageItem] = []
+    for el in region.xpath(".//img"):
+        absolute = _absolute_http_url(el.get("src") or "", base_url)
+        if absolute is None or absolute in seen or _is_tracking_pixel(el):
+            continue
+        seen.add(absolute)
+        alt = el.get("alt")
+        images.append(ImageItem(url=absolute, alt="" if alt is None else alt))
+        if len(images) >= cap:
+            break
+    return images
+
+
 def _fallback_text(tree: lxml_html.HtmlElement) -> str:
     body = tree.find("body")
     target = body if body is not None else tree
@@ -129,6 +203,7 @@ def extract_html(
         og = og.model_copy(update={"image": urljoin(final_url, og.image)})
 
     links = collect_links(tree, final_url)
+    images = collect_images(tree, final_url)
 
     traf_text = trafilatura.extract(
         html,
@@ -164,6 +239,7 @@ def extract_html(
             ),
         ),
         links=links,
+        images=images,
         truncated=False,
     )
 

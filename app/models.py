@@ -59,6 +59,11 @@ class Link(BaseModel):
     text: str = ""
 
 
+class ImageItem(BaseModel):
+    url: str
+    alt: str = ""
+
+
 class ExtractResponse(BaseModel):
     url: str
     requested_url: str
@@ -67,6 +72,7 @@ class ExtractResponse(BaseModel):
     main_text: str
     metadata: PageMetadata
     links: list[Link]
+    images: list[ImageItem] = Field(default_factory=list)
     truncated: bool = False
     profile_id: str = ""
     profile_version: str = ""

@@ -36,3 +36,4 @@ def test_extract_example_com():
     assert data["truncated"] is False
     assert data["metadata"]["content_type"]
     assert isinstance(data["links"], list)
+    assert isinstance(data["images"], list)

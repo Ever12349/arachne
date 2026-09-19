@@ -1,8 +1,8 @@
 # arachne 设计文档
 
-> 版本：v0.8.0 · 受众：维护者与调用方（AI Agent 系统）  
+> 版本：v0.8.1 · 受众：维护者与调用方（AI Agent 系统）  
 > 仓库：https://github.com/Ever12349/arachne  
-> 状态：P7a 已落地（单实例 / 内网 sidecar 生产加固：可选 API key、`/ready`、httpx pin-IP、egress allowlist、JSON 日志、Prometheus `/metrics`）。P6 半自动 profiles（`POST /profiles/suggest` + `POST /profiles`）与 P5 SQLite jobs 仍有效。Worker 仍为进程内 asyncio。**不要**多副本（无 Postgres/Redis）。TLS 终止在反向代理，应用本身只讲 HTTP。默认镜像仍不含浏览器。无 OAuth / webhook / 密钥绑定客户端。会话仍为 Fernet 文件。可选 OpenAI 兼容 LLM（`ARACHNE_LLM_*`）仅用于 suggest。
+> 状态：P7a 已落地（单实例 / 内网 sidecar 生产加固：可选 API key、`/ready`、httpx pin-IP、egress allowlist、JSON 日志、Prometheus `/metrics`）。0.8.1 增加正文区域 `images`（**不**与 `metadata.og.image` 合并）。P6 半自动 profiles（`POST /profiles/suggest` + `POST /profiles`）与 P5 SQLite jobs 仍有效。Worker 仍为进程内 asyncio。**不要**多副本（无 Postgres/Redis）。TLS 终止在反向代理，应用本身只讲 HTTP。默认镜像仍不含浏览器。无 OAuth / webhook / 密钥绑定客户端。会话仍为 Fernet 文件。可选 OpenAI 兼容 LLM（`ARACHNE_LLM_*`）仅用于 suggest。
 
 ## 1. 定位
 
@@ -23,7 +23,7 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 
 | 能力 | 说明 |
 |------|------|
-| URL → 结构化页 | title、main_text、metadata、links、truncated |
+| URL → 结构化页 | title、main_text、metadata、links、images、truncated |
 | 稳定 HTTP API | FastAPI，供 Agent 工具层调用 |
 | 生产可用性（P1） | POST 会话注入、速率/并发、TTL 缓存、`max_chars`、`/stats` |
 | 登录态与反爬韧性（P2） | 加密 `session_id`、超时/连接重试、UA 策略、挑战页识别、可选 `render` |
@@ -44,7 +44,7 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 
 ## 3. API 契约（面向 Agent）
 
-契约版本 **0.8.0**。
+契约版本 **0.8.1**。
 
 ### 3.1 端点（P7）
 
@@ -81,7 +81,7 @@ POST `/extract` JSON：
 
 ### 3.2 成功响应
 
-`links` 使用对象列表。`url` 为重定向后的最终地址；`requested_url` 为调用方原始 URL。metadata 字符串字段缺省为 `""`。`truncated` 默认 `false`：仅在 `main_text` 因 `max_chars` 或硬上限被截断时为 `true`。成功体 **没有** `cached` 字段；命中只计入日志与 `/stats`。
+`links` 与 `images` 使用对象列表。`url` 为重定向后的最终地址；`requested_url` 为调用方原始 URL。metadata 字符串字段缺省为 `""`。`truncated` 默认 `false`：仅在 `main_text` 因 `max_chars` 或硬上限被截断时为 `true`。成功体 **没有** `cached` 字段；命中只计入日志与 `/stats`。
 
 `profile_id` / `profile_version` 在未选中 profile 时为 `""`。`profile_fallback` 仅在**已选中** profile、但 title/main 选择器未抽到内容、因而回退 trafilatura/generic 时为 `true`；无 profile 或 profile 选择器成功时为 `false`。
 
@@ -105,6 +105,9 @@ POST `/extract` JSON：
   "links": [
     {"href": "https://example.com/a", "text": "A"}
   ],
+  "images": [
+    {"url": "https://example.com/photo.jpg", "alt": "A photo"}
+  ],
   "truncated": false,
   "profile_id": "",
   "profile_version": "",
@@ -120,6 +123,10 @@ POST `/extract` JSON：
 - 提供 `max_chars`：先夹到 `[1, MAIN_TEXT_MAX_CHARS]`，再截断；发生截断则 `truncated=true`
 
 链接：全页 lxml `<a>`；跳过空 href、裸 `#` fragment、`javascript:` / `mailto:` / `tel:`、非 `http(s)`；锚文本上限 `LINK_TEXT_MAX_CHARS=200`；最多 50 条；同 host 优先（比较 host 时去掉前导 `www.`）。
+
+图片（`images`）：只扫**正文区域**的 `<img>`，不是整页 chrome。若站点 profile 的 `main_selector` 命中节点，只扫该子树；否则优先 `<article>`，再 `<main>`，最后 `body`（仍做像素过滤）。`url` 相对页面最终 URL 解析为绝对 `http`/`https`；跳过 `data:`、空/缺失 `src`、以及明显跟踪像素（`width` 或 `height` 属性 ≤ 2，或宽高都像 1×1）。`alt` 取 `img[alt]`，否则 `""`。按最终绝对 URL 去重，上限 `ARACHNE_MAX_IMAGES`（默认 10）。没有任何合格图时返回 `images: []`，**不**因此失败抽取。
+
+**`metadata.og.image` 保持独立**：og 图只写 metadata，**绝不**合并进 `images`。调用方若需要封面图，读 `metadata.og.image`；正文插图只看 `images`。
 
 ### 3.3 错误响应（机读）
 
@@ -559,6 +566,7 @@ profiles/
 - 响应体上限 2MB（`Content-Length` 超限或实际读取超限 → `too_large`）
 - `main_text` 硬上限 `MAIN_TEXT_MAX_CHARS=100_000`（缓存之后应用）
 - 链接最多 50；锚文本 `LINK_TEXT_MAX_CHARS=200`
+- 正文图片最多 `ARACHNE_MAX_IMAGES=10`（不与 `metadata.og.image` 合并）
 - User-Agent：`ARACHNE_USER_AGENT`；POST 调用方或会话可覆盖；`ua_strategy=rotate` 在未显式 UA 时从池中选取
 - 共享 `httpx.AsyncClient`（FastAPI lifespan）
 - 全局固定窗口 QPS=5（`ARACHNE_QPS`）；抽取并发 `asyncio.Semaphore(10)`（`ARACHNE_MAX_CONCURRENCY`），仅 cache miss（含 `render=true`）
@@ -710,6 +718,7 @@ flowchart LR
 
 ## 7. 与当前仓库状态
 
+- 0.8.1：`ExtractResponse.images` 从正文区域收集 `<img>`；`metadata.og.image` 独立、不合并
 - P7a 已实现：可选 API key、`/ready`、httpx pin-IP、egress allowlist、JSON 日志、`/metrics`、profiles 写盘闸门
 - P6 仍有效：`POST /profiles/suggest` 与 `POST /profiles`；suggest 不写盘；写入需 `ARACHNE_PROFILES_WRITE=1`
 - P5 仍有效：同步 `/extract` 与批量 `/jobs`；jobs 落 SQLite；**单实例**，不要扩副本
@@ -719,7 +728,7 @@ flowchart LR
 
 ## 8. 验收（P7a）
 
-1. `uvicorn app.main:app` 可在**未安装 Playwright**、**未配置 LLM key**、**REQUIRE_AUTH=false** 时启动；OpenAPI version `0.8.0`  
+1. `uvicorn app.main:app` 可在**未安装 Playwright**、**未配置 LLM key**、**REQUIRE_AUTH=false** 时启动；OpenAPI version `0.8.1`  
 2. `ARACHNE_REQUIRE_AUTH=true` 且 `ARACHNE_API_KEYS` 为空 → lifespan 拒绝启动  
 3. 鉴权开：无 key / 错 key → `unauthorized`（401）；Bearer 或 `X-Arachne-Key` 均可；`/health` 与 `/ready` 免鉴权；`/metrics`、`/stats` 受 `*_PUBLIC` 控制  
 4. `POST /profiles` 在 `ARACHNE_PROFILES_WRITE` 未开时 → `forbidden`（403），即使鉴权关闭  

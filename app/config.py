@@ -56,6 +56,8 @@ def _env_csv(name: str) -> tuple[str, ...]:
     return tuple(part.strip() for part in str(raw).split(",") if part.strip())
 
 
+MAX_IMAGES = _env_int("ARACHNE_MAX_IMAGES", 10)
+
 MAX_CONCURRENCY = _env_int("ARACHNE_MAX_CONCURRENCY", 10)
 QPS = _env_int("ARACHNE_QPS", 5)
 CACHE_TTL_SECONDS = _env_int("ARACHNE_CACHE_TTL_SECONDS", 60)
