@@ -97,3 +97,6 @@ class StatsResponse(BaseModel):
     in_flight: int
     latency_ms_sum: float
     latency_ms_count: int
+    qps_waits: int = 0
+    qps_wait_ms_sum: float = 0.0
+    auto_renders: int = 0

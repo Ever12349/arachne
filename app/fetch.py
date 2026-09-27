@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import httpx
@@ -14,8 +15,11 @@ from app.config import (
     USER_AGENT,
 )
 from app.errors import ArachneError, fetch_failed, timeout_error, too_large
+from app.proxy_util import configured_proxy_url, redact_proxy_url
 from app.ssrf import assert_public_http_url
 from app.transport import PinIPAsyncTransport
+
+logger = logging.getLogger("arachne")
 
 HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})
 
@@ -43,15 +47,41 @@ async def ssrf_request_hook(request: httpx.Request) -> None:
 
 
 def create_http_client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(
-        transport=PinIPAsyncTransport(),
-        follow_redirects=True,
-        max_redirects=MAX_REDIRECTS,
-        timeout=HTTP_TIMEOUT,
-        verify=True,
-        headers={"User-Agent": USER_AGENT},
-        event_hooks={"request": [ssrf_request_hook]},
-    )
+    """Shared client. Pin-IP when no proxy; httpx proxy transport when ARACHNE_HTTP_PROXY is set.
+
+    `trust_env` is off so HTTP_PROXY / HTTPS_PROXY / ALL_PROXY do not apply.
+    The request hook still runs assert_public_http_url (scheme, egress, public IP)
+    before the proxy or the pinned connection is used.
+    """
+    proxy = configured_proxy_url()
+    if proxy is None:
+        return httpx.AsyncClient(
+            transport=PinIPAsyncTransport(),
+            follow_redirects=True,
+            max_redirects=MAX_REDIRECTS,
+            timeout=HTTP_TIMEOUT,
+            verify=True,
+            trust_env=False,
+            headers={"User-Agent": USER_AGENT},
+            event_hooks={"request": [ssrf_request_hook]},
+        )
+    logger.info("http proxy enabled proxy=%s", redact_proxy_url(proxy))
+    try:
+        return httpx.AsyncClient(
+            proxy=proxy,
+            follow_redirects=True,
+            max_redirects=MAX_REDIRECTS,
+            timeout=HTTP_TIMEOUT,
+            verify=True,
+            trust_env=False,
+            headers={"User-Agent": USER_AGENT},
+            event_hooks={"request": [ssrf_request_hook]},
+        )
+    except (ValueError, httpx.InvalidURL) as exc:
+        raise fetch_failed(
+            "Invalid ARACHNE_HTTP_PROXY",
+            {"proxy": redact_proxy_url(proxy)},
+        ) from exc
 
 
 def media_type(content_type: str) -> str:

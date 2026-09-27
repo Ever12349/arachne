@@ -1,8 +1,10 @@
 """SSRF guards: only public http(s) URLs, resolved before fetch.
 
-httpx connects via PinIPAsyncTransport (TCP to the resolved public IP, TLS
-server_hostname = original host). Playwright still navigates by hostname, so
-the render path keeps a DNS-rebinding window; see docs/DESIGN.md.
+Direct httpx connects via PinIPAsyncTransport (TCP to the resolved public IP,
+TLS server_hostname = original host). When ARACHNE_HTTP_PROXY is set, httpx
+uses that proxy instead of pin-IP; assert_public_http_url still runs first.
+Playwright navigates by hostname (through the same proxy when set) and is not
+pin-IP, so the render path keeps a DNS-rebinding window; see docs/DESIGN.md.
 """
 
 from __future__ import annotations

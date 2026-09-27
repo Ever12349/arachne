@@ -7,6 +7,7 @@ import logging
 from app import config
 from app.errors import ArachneError, render_failed, render_unavailable
 from app.fetch import FetchedPage
+from app.proxy_util import playwright_proxy
 from app.ssrf import assert_public_http_url
 
 logger = logging.getLogger("arachne")
@@ -43,13 +44,17 @@ async def render_url(
     timeout_ms = max(int(config.RENDER_TIMEOUT * 1000), 1)
     hdrs = dict(headers or {})
     user_agent = hdrs.pop("User-Agent", None)
+    proxy = playwright_proxy()
+    launch_kwargs: dict[str, object] = {
+        "headless": True,
+        "args": ["--disable-dev-shm-usage"],
+    }
+    if proxy is not None:
+        launch_kwargs["proxy"] = proxy
 
     try:
         async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(
-                headless=True,
-                args=["--disable-dev-shm-usage"],
-            )
+            browser = await playwright.chromium.launch(**launch_kwargs)
             try:
                 context_kwargs: dict[str, object] = {}
                 if user_agent:

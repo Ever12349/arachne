@@ -1,9 +1,31 @@
 # Single-instance sidecar only (SQLite + in-process job worker). Do not scale replicas.
 # Terminate TLS at a reverse proxy in front; this container speaks HTTP.
 # Production intranet: set ARACHNE_REQUIRE_AUTH=true and ARACHNE_API_KEYS=...
+#
+# Optional env (process defaults; not baked into the image):
+#   ARACHNE_HTTP_PROXY         empty = direct. http(s) URL for httpx and Playwright. No request-body proxy.
+#   ARACHNE_QPS_MODE           queue (default) | reject. queue waits for the 1s window; reject is immediate 429.
+#   ARACHNE_QPS_WAIT_SECONDS   default 30. <=0 does not wait (immediate 429 when the window is full).
+#   ARACHNE_AUTO_RENDER        default true. challenge_detected with render=false retries once via Playwright
+#                              when it is installed. The JSON body is unchanged.
+#
+# Default `docker compose up` builds the slim image (no Chromium).
+# Playwright image: docker compose --profile playwright up --build arachne-playwright
+# Do not run both services together; they publish host port 8000.
 services:
   arachne:
     build: .
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+
+  arachne-playwright:
+    profiles: ["playwright"]
+    build:
+      context: .
+      dockerfile: Dockerfile.playwright
     ports:
       - "8000:8000"
     restart: unless-stopped

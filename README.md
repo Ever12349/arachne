@@ -6,7 +6,7 @@ The service fetches HTML with `httpx` (optional headless Playwright) and extract
 
 This is a **trusted single-instance / intranet sidecar**. Do not run multiple replicas (SQLite + in-process worker). Terminate TLS at a reverse proxy; the app speaks HTTP. Optional shared API keys are not OAuth and are not bound to a client.
 
-API contract version **0.8.1**.
+API contract version **0.9.0**.
 
 ## Install
 
@@ -43,6 +43,10 @@ Optional settings (defaults shown):
 export ARACHNE_USER_AGENT="MyAgent/1.0"
 export ARACHNE_MAX_CONCURRENCY=10
 export ARACHNE_QPS=5
+export ARACHNE_QPS_MODE=queue             # queue (default) | reject
+export ARACHNE_QPS_WAIT_SECONDS=30        # queue only; <=0 does not wait
+export ARACHNE_AUTO_RENDER=true           # challenge page → one Playwright try when installed
+export ARACHNE_HTTP_PROXY=                # empty = off; http(s) proxy for httpx and Playwright
 export ARACHNE_CACHE_TTL_SECONDS=60
 export ARACHNE_CACHE_MAXSIZE=256
 export ARACHNE_SESSIONS_DIR=./data/sessions
@@ -104,7 +108,13 @@ docker compose up --build -d
 
 Compose mounts `./data:/app/data` so `arachne.db`, sessions, and profiles survive container recreation. The default `ARACHNE_DATABASE_URL` is `sqlite+aiosqlite:///./data/arachne.db`.
 
-Playwright image (Chromium + system deps):
+Playwright image (Chromium + system deps). Compose profile `playwright` builds `Dockerfile.playwright` and does not start with a plain `docker compose up`:
+
+```bash
+docker compose --profile playwright up --build arachne-playwright
+```
+
+Or build and run the image directly:
 
 ```bash
 docker build -f Dockerfile.playwright -t arachne:playwright .
@@ -112,6 +122,12 @@ docker run --rm -p 8000:8000 \
   -e ARACHNE_SESSION_KEY \
   -v "$(pwd)/data:/app/data" \
   arachne:playwright
+```
+
+The slim service and `arachne-playwright` both publish host port 8000. Run one of them. Mirror overlay:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.mirror.yml --profile playwright up --build arachne-playwright
 ```
 
 China mirror overlays work the same as the default image (`PYTHON_IMAGE`, `PIP_INDEX_URL`, `PIP_TRUSTED_HOST`). See below.
@@ -365,11 +381,15 @@ Success (200):
 
 POST headers are allowlisted: `Authorization`, `Accept`, `Accept-Language`, `User-Agent`, `Referer`, `Cache-Control`. `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, and `Cookie` are stripped (`Cookie` only via the `cookies` field or session `cookies`). A caller or session `User-Agent` overrides `ARACHNE_USER_AGENT` and `ua_strategy=rotate`.
 
-Timeouts and connection errors are retried (`ARACHNE_MAX_RETRIES=2`, backoff 0.5s then 1s). 4xx and challenge pages are not retried. 2xx HTML or 401/403 bodies that match high-precision challenge markers (`cf-challenge`, `_cf_chl`, `just a moment`, `attention required`, …) return `challenge_detected` (403). Other 401/403 stay `unauthorized_upstream` (502).
+Timeouts and connection errors are retried (`ARACHNE_MAX_RETRIES=2`, backoff 0.5s then 1s). 4xx and challenge pages are not retried. 2xx HTML or 401/403 bodies that match high-precision challenge markers (`cf-challenge`, `_cf_chl`, `just a moment`, `attention required`, …) are `challenge_detected` (403). Other 401/403 stay `unauthorized_upstream` (502).
 
-Agent client timeout should be slightly above the server read timeout (15s); **≥ 20s** is a reasonable default. Leave more room when `render=true`.
+`ARACHNE_AUTO_RENDER` defaults to on. A request with `render: false` that hits `challenge_detected` is fetched again with Playwright when Playwright imports, inside the same concurrency slot and the same QPS acquire. Success is cached with the render bit set (the JSON body has no `render_used` field). If Playwright is not installed, the original `challenge_detected` is returned and is not rewritten to `render_unavailable`. `render: true` still uses the browser only. `unauthorized_upstream` and `extract_empty` are not auto-rendered. The same fetch path applies to `POST /profiles/suggest`.
 
-Global extract QPS is a fixed 1-second window of 5 (override with `ARACHNE_QPS`). Cache misses (including Playwright) are also limited by `ARACHNE_MAX_CONCURRENCY` (default 10). `/health`, `/ready`, `/stats`, `/metrics`, **creating** a job (`POST /jobs`), and `POST /profiles` (write) are exempt. `POST /profiles/suggest` **does** consume QPS and the extract semaphore. Each job item still goes through `run_extract` and therefore the limiter.
+`ARACHNE_HTTP_PROXY` (empty = off) is the only proxy setting. There is no proxy field on the request body, and `HTTP_PROXY` / `HTTPS_PROXY` are ignored. When set, httpx uses that proxy and does not pin the upstream IP; `assert_public_http_url` and the egress allowlist still run before the fetch. Playwright uses the same proxy. Userinfo in the proxy URL is redacted in logs. An invalid proxy URL fails the client with `fetch_failed`.
+
+Agent client timeout should cover the server read timeout (15s) plus `ARACHNE_QPS_WAIT_SECONDS` when mode is `queue`. **≥ 20s** is a reasonable default with `reject` or a short wait. Leave room for `ARACHNE_RENDER_TIMEOUT` when `render=true`, and for both the httpx read and the render timeout when auto-render may run.
+
+Global extract QPS is a fixed 1-second window of 5 (override with `ARACHNE_QPS`). `ARACHNE_QPS_MODE` defaults to `queue`: a full window sleeps until the next boundary, up to `ARACHNE_QPS_WAIT_SECONDS` (default 30). Past that budget the response is still `rate_limited` (429). `reject` returns 429 immediately. An unrecognized mode is treated as `queue`. `ARACHNE_QPS_WAIT_SECONDS <= 0` does not sleep. Each `run_extract` / `run_suggest` acquires one slot; auto-render does not take a second one. Cache misses (including Playwright) are also limited by `ARACHNE_MAX_CONCURRENCY` (default 10). `/health`, `/ready`, `/stats`, `/metrics`, **creating** a job (`POST /jobs`), and `POST /profiles` (write) are exempt. `POST /profiles/suggest` **does** consume QPS and the extract semaphore. Each job item still goes through `run_extract` and therefore the limiter.
 
 ## Batch jobs
 
@@ -455,7 +475,10 @@ curl http://127.0.0.1:8000/metrics
   "cache_misses": 0,
   "in_flight": 0,
   "latency_ms_sum": 0.0,
-  "latency_ms_count": 0
+  "latency_ms_count": 0,
+  "qps_waits": 0,
+  "qps_wait_ms_sum": 0.0,
+  "auto_renders": 0
 }
 ```
 
@@ -517,7 +540,7 @@ How the new P2/P3 codes are verified without a real site or browser:
 | `llm_failed` | Mock LLM selectors that fail lxml self-test with `"strategy":"llm"` (`tests/test_profiles_suggest.py`) |
 | `job_not_found` | `GET` or cancel an unknown / expired job id (`tests/test_jobs.py`) |
 
-`tests/test_extract.py` covers content-area `images` (relative→absolute, tracker skip, dedupe/cap, empty list, `og.image` not merged). `tests/test_jobs.py` covers create / poll / cancel / per-item errors / QPS. `tests/test_jobs_persistence.py` covers SQLite reopen, URL search, delete, `X-Arachne-Client` isolation, and TTL cleanup. `tests/test_profiles_suggest.py` covers heuristic suggest, `llm_unavailable`, mocked LLM verify/fail, auto fallback, and that suggest does not write disk. `tests/test_profiles_write.py` covers 409 / overwrite / hot-reload after write and the `ARACHNE_PROFILES_WRITE` gate. `tests/test_auth.py`, `tests/test_ready.py`, `tests/test_egress.py`, and `tests/test_transport.py` cover P7a auth, readiness, allowlist, and pin-IP.
+`tests/test_extract.py` covers content-area `images` (relative→absolute, tracker skip, dedupe/cap, empty list, `og.image` not merged). `tests/test_jobs.py` covers create / poll / cancel / per-item errors / QPS. `tests/test_jobs_persistence.py` covers SQLite reopen, URL search, delete, `X-Arachne-Client` isolation, and TTL cleanup. `tests/test_profiles_suggest.py` covers heuristic suggest, `llm_unavailable`, mocked LLM verify/fail, auto fallback, and that suggest does not write disk. `tests/test_profiles_write.py` covers 409 / overwrite / hot-reload after write and the `ARACHNE_PROFILES_WRITE` gate. `tests/test_auth.py`, `tests/test_ready.py`, `tests/test_egress.py`, and `tests/test_transport.py` cover P7a auth, readiness, allowlist, and pin-IP. `tests/test_qps_queue.py`, `tests/test_auto_render.py`, and `tests/test_proxy_client.py` cover 0.9.0 queue / reject, auto-render, and the proxy client branch (no live network).
 
 `tests/test_jobs.py` covers create 202, per-item failure still `completed`, cancel, `job_not_found`, max URLs, and that creating a job does not burn QPS.
 
