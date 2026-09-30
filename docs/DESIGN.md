@@ -1,8 +1,8 @@
 # arachne 设计文档
 
-> 版本：v0.9.0 · 受众：维护者与调用方（AI Agent 系统）  
+> 版本：v0.10.0 · 受众：维护者与调用方（AI Agent 系统）  
 > 仓库：https://github.com/Ever12349/arachne  
-> 状态：P8′「傻瓜抽取」已落地（调用方仍只 POST `url`；QPS 排队、`ARACHNE_HTTP_PROXY`、挑战页自动 Playwright 都在服务端）。单实例 / 内网 sidecar。P7a（可选 API key、`/ready`、httpx pin-IP、egress allowlist、JSON 日志、Prometheus `/metrics`）与 0.8.1 正文区域 `images` 仍有效。P6 半自动 profiles 与 P5 SQLite jobs 仍有效。Worker 仍为进程内 asyncio。**不要**多副本（无 Postgres/Redis）。TLS 终止在反向代理，应用本身只讲 HTTP。默认镜像仍不含浏览器（Compose profile `playwright` 才构建 `Dockerfile.playwright`）。无 OAuth / webhook / 密钥绑定客户端。会话仍为 Fernet 文件。可选 OpenAI 兼容 LLM（`ARACHNE_LLM_*`）仅用于 suggest。
+> 状态：P9′ 已落地（调用方仍只 POST `url`；`challenge_detected` / `unauthorized_upstream` 可各回退一次 Playwright，并把浏览器 Cookie 写成 Fernet `auto-<host>`）。P8′（QPS 排队、`ARACHNE_HTTP_PROXY`、挑战页自动 Playwright）仍有效。单实例 / 内网 sidecar。P7a（可选 API key、`/ready`、httpx pin-IP、egress allowlist、JSON 日志、Prometheus `/metrics`）与 0.8.1 正文区域 `images` 仍有效。P6 半自动 profiles 与 P5 SQLite jobs 仍有效。Worker 仍为进程内 asyncio。**不要**多副本（无 Postgres/Redis）。TLS 终止在反向代理，应用本身只讲 HTTP。默认镜像仍不含浏览器（Compose profile `playwright` 才构建 `Dockerfile.playwright`）。无 OAuth / webhook / 密钥绑定客户端。会话仍为 Fernet 文件。可选 OpenAI 兼容 LLM（`ARACHNE_LLM_*`）仅用于 suggest。复用自动会话需要配置 `ARACHNE_SESSION_KEY`。
 
 ## 1. 定位
 
@@ -32,6 +32,7 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 | 任务持久化（P5） | SQLite（SQLAlchemy 2.x async + aiosqlite）；DB 为 jobs 唯一真源；`X-Arachne-Client` 隔离；`GET /jobs/search`；`DELETE /jobs/{id}` |
 | 半自动 profiles（P6） | `POST /profiles/suggest`（heuristic / 可选 LLM，不写盘）+ `POST /profiles`（校验后写入 `{id}.json`，`overwrite`） |
 | 单实例生产加固（P7a） | 可选 API key、`GET /ready`、httpx pin-IP、egress allowlist、`ARACHNE_LOG_JSON`、Prometheus `/metrics`、profiles 写盘闸门、job TTL 默认 7 天 |
+| 软墙回退与自动会话（P9′） | `unauthorized_upstream` 与挑战页可各回退一次 Playwright；非空浏览器 Cookie 写入 `auto-<host>.bin`。不解验证码，不保证站点成功 |
 
 ### 2.2 安全与合规边界（硬约束）
 
@@ -44,7 +45,7 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 
 ## 3. API 契约（面向 Agent）
 
-契约版本 **0.9.0**。
+契约版本 **0.10.0**。响应 JSON 不新增字段。
 
 ### 3.1 端点（P7）
 
@@ -187,6 +188,20 @@ Agent 应根据 `error.code` 分支（重试 / 换 `ua_strategy` 或 `render` / 
 - **没有**会话增删改 HTTP API。用 `scripts/write_session.py` 离线写入
 - 日志禁止 Cookie / Authorization / 会话明文
 
+**自动会话（P9′，`auto-<host>.bin`）**
+
+- id：请求 URL 的 hostname，经 `normalize_host` 与 `profile_id_from_host` 清洗后加前缀 `auto-`，再截断到 64 并去掉末尾 `-`，以匹配 `SESSION_ID_RE`。`www.example.com` 与 `example.com` 共用 `auto-example-com`
+- 请求**没有** `session_id`：文件存在则加载，再与 body 合并（body 胜）。解密/解析失败 → 当作空会话，日志 `auto_session=ignored_invalid`，**不** 400
+- 请求**有** `session_id`：只走原来的 `load_session`。文件缺失或损坏仍是 `session_invalid`。不另读 auto，浏览器成功后也不写 auto
+- `ARACHNE_SESSION_PERSIST` 默认 true，**只关写入**。读现有 auto 文件不受影响
+- 无密钥或密钥不是合法 Fernet：跳过写入，抽取仍可成功，日志 `session_persist=skipped_no_key`。服务**不**生成密钥。要真正复用必须配置 `ARACHNE_SESSION_KEY`
+- Playwright `goto` 之后、关闭 context 之前取 `context.cookies()`，展平为 `name → value`（同名后者胜，**不过滤 domain**）。落盘 headers 为 `{}`
+- `_accept_page` 通过后写入：自动回退成功和显式 `render=true` 成功都写。与随后 `extract_with_profile` 是否抽出正文无关
+- 浏览器 Cookie 为空则不写，旧文件保留。失败路径不改旧文件。非空成功写入**覆盖** `auto-<host>.bin`
+- `write_session_file` 同目录临时文件 + `os.replace`
+- `POST /profiles/suggest` 可以读 auto，**不写**。`run_extract`（含 jobs）可以写
+- 抽取日志 `session_persist=0|1|skipped_empty|skipped_disabled|skipped_no_key`。不新增 Prometheus 计数；成功的自动回退仍计入已有 `auto_renders`
+
 生成密钥并写入会话：
 
 ```bash
@@ -224,7 +239,7 @@ python scripts/write_session.py --id demo \
 - 把 `main_text` 当作模型上下文的主输入；用 `max_chars` 控制 prompt 体积
 - 同一规范化 URL + 合并后会话指纹 + `render` + `ua_strategy` + `profile_id@version` 在 TTL 内命中进程内缓存（响应体仍无 `cached` 字段）
 - 全局限流：固定 1 秒窗口 QPS=5。`ARACHNE_QPS_MODE=queue`（默认）在窗口满时睡到下一窗口边界，最长 `ARACHNE_QPS_WAIT_SECONDS`（默认 30）；超时仍 `rate_limited` / 429。`reject` 为立即 429。非法 mode 视为 `queue`。`wait<=0` 不等待。每次 `run_extract` / `run_suggest` 只 acquire 一次
-- 遇到 `challenge_detected`：默认 `ARACHNE_AUTO_RENDER=true` 时，若请求 `render=false` 且本机能 import Playwright，服务端在同一次 semaphore 持有内再渲染一次（不占第二个 QPS 名额）。未安装 Playwright 则原样返回 `challenge_detected`，不改成 `render_unavailable`。显式 `render=true` 只走浏览器。调用方仍可换 Cookie、`ua_strategy=rotate`。不要指望服务端解验证码。`unauthorized_upstream` / `extract_empty` 不自动渲染
+- 遇到 `challenge_detected` 或（默认）`unauthorized_upstream`：`ARACHNE_AUTO_RENDER=true` 且该错误码在 `ARACHNE_AUTO_RENDER_ON` 中、请求 `render=false`、本机能 import Playwright 时，服务端在同一次 semaphore 持有内再渲染一次（不占第二个 QPS 名额）。未安装 Playwright 则原样返回该错误，不改成 `render_unavailable`。显式 `render=true` 只走浏览器。调用方仍可换 Cookie、`ua_strategy=rotate`，或依赖已写入的 `auto-<host>`。不要指望服务端解验证码。`extract_empty` 不自动渲染。不保证任一具体站点成功
 - 遇到 `session_invalid`：检查 id、密钥、会话文件；不要把密钥放进 prompt
 
 ### 3.7 防御性反爬（P2）
@@ -240,10 +255,11 @@ python scripts/write_session.py --id demo \
 
 ### 3.8 可选渲染 `render`（仅 POST）
 
-- `render: false`（默认）：httpx 拉取。若结果为 `challenge_detected` 且 `ARACHNE_AUTO_RENDER`（默认 true）且 `playwright_available()`：同一 helper 内再走一次 Playwright，成功则 `auto_render=1`（只写日志与 `/stats`，**响应不加字段**）。缓存写入时 render 位为 **1**（本次查找键仍按请求的 `render=false`）。Playwright 不可用则跳过回退，返回原来的 `challenge_detected`
+- `render: false`（默认）：httpx 拉取。若错误码属于 `ARACHNE_AUTO_RENDER_ON`（`challenge` → `challenge_detected`，`unauthorized` → `unauthorized_upstream`；未设置默认两者；显式空字符串表示没有码；未知 token 忽略）且 `ARACHNE_AUTO_RENDER`（默认 true）且 `playwright_available()`：同一 helper 内再走一次 Playwright，成功则 `auto_render=1`（只写日志与 `/stats`，**响应不加字段**，不新增 Prometheus 计数）。缓存写入时 render 位为 **1**（本次查找键仍按请求的 `render=false`）。Playwright 不可用则跳过回退，返回**原来的**错误码
 - `true` 且未安装 Playwright → `render_unavailable`（501）。默认 `requirements.txt` / `Dockerfile` **不含**浏览器；Playwright 动态 import，缺包时进程仍能启动。显式 `render=true` **不**先走 httpx
 - `true` 且已安装：headless Chromium，`goto(..., wait_until="domcontentloaded")`，超时 `ARACHNE_RENDER_TIMEOUT` 默认 15s；**仍做 SSRF 检查**；得到 HTML 后走同一套挑战检测 + 抽取
-- 渲染失败（启动/导航/超时等）→ `render_failed`（502），不映射为通用 `timeout`。自动渲染路径上若意外得到 `render_unavailable`，改回原来的 `challenge_detected`
+- 渲染失败（启动/导航/超时等）→ `render_failed`（502），不映射为通用 `timeout`。自动渲染路径上若意外得到 `render_unavailable`，改回原来的错误（`challenge_detected` 或 `unauthorized_upstream`）
+- 浏览器页通过 `_accept_page` 后，可按 §3.4 把 Cookie 写入 `auto-<host>.bin`（需要 `ARACHNE_SESSION_PERSIST` 与合法 `ARACHNE_SESSION_KEY`）。suggest 使用同一个 `fetch_ready_page` 但不写 auto
 - 渲染（含自动回退）走**同一**抽取 `asyncio.Semaphore`，且不第二次 acquire QPS。`POST /profiles/suggest` 使用同一个 `fetch_ready_page`
 - 独立依赖：`requirements-playwright.txt` + `Dockerfile.playwright`。Compose profile `playwright` 构建该 Dockerfile；默认 `docker compose up` 仍是瘦镜像
 
@@ -703,7 +719,19 @@ profiles/
 - [x] 响应不新增字段。日志 `qps_wait_ms`、`auto_render=0|1`
 - [x] `/stats` 与 Prometheus 双写 `qps_waits`、`qps_wait_ms_sum`（指标侧为秒：`arachne_qps_wait_seconds_sum`）、`auto_renders`
 - [x] Compose profile `playwright` 构建 `Dockerfile.playwright`；默认仍是瘦镜像
-- [x] **不做**：按 host 限速、代理池、对 `unauthorized_upstream` / `extract_empty` 自动渲染、mnemo、profiles/auth/DB schema、把 Chromium 塞进默认镜像、多副本 / Redis
+- [x] **不做**：按 host 限速、代理池、对 `extract_empty` 自动渲染、mnemo、profiles/auth/DB schema、把 Chromium 塞进默认镜像、多副本 / Redis。对 `unauthorized_upstream` 的一次浏览器回退见 P9′
+
+### P9′ — 软墙回退与自动会话（0.10.0，已实现）
+
+调用方继续只 POST `/extract`（或 jobs）里的 `url`。不新增响应字段，不新增 Prometheus 计数，不扩大 `CHALLENGE_MARKERS`，不做站点白名单，不解验证码，不保证 Reuters 或任何站点成功。
+
+- [x] `ARACHNE_AUTO_RENDER` 默认 true。`ARACHNE_AUTO_RENDER_ON` 默认 `challenge,unauthorized`。显式空字符串 → 没有自动渲染码。未知 token 忽略
+- [x] `render=false` 且 httpx 错误码在集合内且 Playwright 可 import → 一次 `render_url`（同一 QPS 与 semaphore）。缺 Playwright 保持原错误，不改成 `render_unavailable`
+- [x] `ARACHNE_SESSION_PERSIST` 默认 true（只关写入）。无/非法 `ARACHNE_SESSION_KEY` 跳过写入，抽取仍可成功，日志 `session_persist=skipped_no_key`。不发明密钥
+- [x] 浏览器 Cookie 展平为 name→value（同名后者胜，不过滤 domain），headers 存 `{}`。`_accept_page` 通过后写：自动回退与显式 `render=true` 都写。空 jar 不覆盖旧文件
+- [x] 无 `session_id` 时读 `auto-<host>`（坏文件忽略）。有 `session_id` 时只读该 id，且不写 auto。suggest 可读不可写。`run_extract` / jobs 可写
+- [x] 成功非空写入覆盖文件。失败不动旧文件。`write_session_file` 同目录临时文件 + `os.replace`
+- [x] **不做**：新浏览器引擎、WebFetch、代理池、指纹、jobs schema、新响应字段、新 Prometheus 计数
 
 ## 6. 路线图总览
 
@@ -719,6 +747,7 @@ flowchart LR
   P5 --> P6
   P6 --> P7[P7a 单实例加固]
   P7 --> P8[P8′ 傻瓜抽取]
+  P8 --> P9[P9′ 自动会话]
 ```
 
 与用户后续需求的对应关系：
@@ -733,10 +762,12 @@ flowchart LR
 | 持久化存储 | P5 | SQLite jobs；会话仍为文件 |
 | 内网 sidecar 加固 | P7a | 可选 API key、pin-IP、allowlist、/ready、/metrics；非多副本 |
 | 傻瓜抽取（排队 / 代理 / 自动渲染） | P8′ | 仍是单次 POST `url`；无多副本 |
+| 软墙后再试一次浏览器并记住 Cookie | P9′ | 仍是单次 POST `url`；不解验证码；复用要 `SESSION_KEY` |
 | 「认证绕过」 | **不实现攻击型绕过** | 以受控会话 + 明确错误码替代 |
 
 ## 7. 与当前仓库状态
 
+- 0.10.0：`ARACHNE_AUTO_RENDER_ON`（含 `unauthorized_upstream`）、Fernet `auto-<host>` 读写；响应契约不新增字段；复用需要 `ARACHNE_SESSION_KEY`
 - 0.9.0：QPS `queue`、`ARACHNE_HTTP_PROXY`、`challenge_detected` 自动 Playwright；响应契约不新增字段
 - 0.8.1：`ExtractResponse.images` 从正文区域收集 `<img>`；`metadata.og.image` 独立、不合并
 - P7a 已实现：可选 API key、`/ready`、httpx pin-IP、egress allowlist、JSON 日志、`/metrics`、profiles 写盘闸门
@@ -748,7 +779,7 @@ flowchart LR
 
 ## 8. 验收（P7a）
 
-1. `uvicorn app.main:app` 可在**未安装 Playwright**、**未配置 LLM key**、**REQUIRE_AUTH=false** 时启动；OpenAPI version `0.9.0`  
+1. `uvicorn app.main:app` 可在**未安装 Playwright**、**未配置 LLM key**、**REQUIRE_AUTH=false** 时启动；OpenAPI version `0.10.0`  
 2. `ARACHNE_REQUIRE_AUTH=true` 且 `ARACHNE_API_KEYS` 为空 → lifespan 拒绝启动  
 3. 鉴权开：无 key / 错 key → `unauthorized`（401）；Bearer 或 `X-Arachne-Key` 均可；`/health` 与 `/ready` 免鉴权；`/metrics`、`/stats` 受 `*_PUBLIC` 控制  
 4. `POST /profiles` 在 `ARACHNE_PROFILES_WRITE` 未开时 → `forbidden`（403），即使鉴权关闭  

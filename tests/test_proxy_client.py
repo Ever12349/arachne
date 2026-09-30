@@ -119,6 +119,9 @@ async def test_render_launch_uses_same_proxy(monkeypatch: pytest.MonkeyPatch, pu
         async def add_cookies(self, cookies):
             return None
 
+        async def cookies(self):
+            return []
+
         async def new_page(self):
             return _Page()
 
@@ -156,14 +159,15 @@ async def test_render_launch_uses_same_proxy(monkeypatch: pytest.MonkeyPatch, pu
     try:
         from app.render import render_url
 
-        page = await render_url("https://example.com/")
+        rendered = await render_url("https://example.com/")
     finally:
         for name, module in saved.items():
             if module is None:
                 sys.modules.pop(name, None)
             else:
                 sys.modules[name] = module
-    assert page.status_code == 200
+    assert rendered.page.status_code == 200
+    assert rendered.cookies == {}
     assert launched["proxy"] == {
         "server": "http://proxy.example:8080",
         "username": "alice",

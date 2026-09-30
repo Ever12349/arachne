@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from app.cache import cache_key
 from app.errors import ArachneError, render_failed
 from app.fetch import FetchedPage, ssrf_request_hook
+from app.render import RenderedPage
 from app.main import app
 from tests.conftest import SAMPLE_HTML, set_high_qps
 
@@ -21,6 +22,10 @@ def _html_page(url: str = "https://example.com/") -> FetchedPage:
         content_type="text/html; charset=utf-8",
         body=SAMPLE_HTML,
     )
+
+
+def _rendered(url: str = "https://example.com/") -> RenderedPage:
+    return RenderedPage(page=_html_page(url), cookies={})
 
 
 def _client_sample(monkeypatch: pytest.MonkeyPatch) -> TestClient:
@@ -58,9 +63,9 @@ def test_render_unavailable_when_playwright_missing(public_dns, monkeypatch: pyt
 def test_render_true_uses_playwright_path(public_dns, monkeypatch: pytest.MonkeyPatch):
     calls = {"n": 0}
 
-    async def fake_render(url: str, **_kwargs) -> FetchedPage:
+    async def fake_render(url: str, **_kwargs) -> RenderedPage:
         calls["n"] += 1
-        return _html_page(url)
+        return _rendered(url)
 
     monkeypatch.setattr("app.render.playwright_available", lambda: True)
     monkeypatch.setattr("app.service.render_url", fake_render)
@@ -139,9 +144,9 @@ def test_render_flag_busts_cache(public_dns, monkeypatch: pytest.MonkeyPatch):
 
     render_counts = {"n": 0}
 
-    async def fake_render(url: str, **_kwargs) -> FetchedPage:
+    async def fake_render(url: str, **_kwargs) -> RenderedPage:
         render_counts["n"] += 1
-        return _html_page(url)
+        return _rendered(url)
 
     monkeypatch.setattr("app.main.create_http_client", fake_create)
     monkeypatch.setattr("app.render.playwright_available", lambda: True)
@@ -205,8 +210,8 @@ async def test_render_uses_same_semaphore(monkeypatch: pytest.MonkeyPatch):
     from app.limits import FixedWindowRateLimiter, Stats
     from app.service import run_extract
 
-    async def fake_render(url: str, **_kwargs) -> FetchedPage:
-        return _html_page(url)
+    async def fake_render(url: str, **_kwargs) -> RenderedPage:
+        return _rendered(url)
 
     monkeypatch.setattr("app.service.render_url", fake_render)
     monkeypatch.setattr("app.render.playwright_available", lambda: True)

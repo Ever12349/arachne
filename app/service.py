@@ -11,9 +11,9 @@ import httpx
 from app import config
 from app import render as render_mod
 from app.antibot import fetch_with_retries, headers_for_upstream, raise_if_challenge
+from app.auto_session import persist_auto_session, resolve_session_material
 from app.cache import ResultCache, cache_key, session_fingerprint
 from app.errors import (
-    CHALLENGE_DETECTED,
     INTERNAL,
     RENDER_UNAVAILABLE,
     ArachneError,
@@ -31,7 +31,6 @@ from app.profiles.loader import ProfileRegistry, resolve_profile
 from app.profiles.models import SuggestResponse, SuggestStrategy
 from app.profiles.suggest import suggest_from_html
 from app.render import render_url
-from app.sessions import load_session, merge_session_material
 
 logger = logging.getLogger("arachne")
 
@@ -67,28 +66,29 @@ async def fetch_ready_page(
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
     render: bool = False,
-) -> tuple[FetchedPage, int]:
+) -> tuple[FetchedPage, int, dict[str, str] | None]:
     """Fetch or render, then apply challenge / status / HTML gates.
 
-    Returns `(page, auto_render)` where `auto_render` is 1 only after a
-    successful Playwright fallback. Explicit `render=True` is browser-only.
-    When `render` is false and the httpx page is `challenge_detected`, one
-    render is attempted if `ARACHNE_AUTO_RENDER` is on and Playwright imports.
-    Missing Playwright keeps the original `challenge_detected` (it is not
-    rewritten to `render_unavailable`). Caller holds the extract semaphore
-    and has already taken the single QPS slot.
+    Returns `(page, auto_render, browser_cookies)`. `auto_render` is 1 only
+    after a successful Playwright fallback. `browser_cookies` is the flattened
+    jar after an accepted browser page, and None on the httpx-only path.
+    Explicit `render=True` is browser-only. When `render` is false and the
+    httpx error code is in `ARACHNE_AUTO_RENDER_ON`, one render is attempted
+    if `ARACHNE_AUTO_RENDER` is on and Playwright imports. Missing Playwright
+    keeps the original error (it is not rewritten to `render_unavailable`).
+    Caller holds the extract semaphore and has already taken the single QPS slot.
     """
     requested = (url or "").strip()
     if render:
-        page = await render_url(requested, headers=headers, cookies=cookies)
-        _accept_page(page)
-        return page, 0
+        rendered = await render_url(requested, headers=headers, cookies=cookies)
+        _accept_page(rendered.page)
+        return rendered.page, 0, rendered.cookies
 
     page = await fetch_with_retries(client, requested, headers=headers, cookies=cookies)
     try:
         _accept_page(page)
     except ArachneError as exc:
-        if exc.code != CHALLENGE_DETECTED or not config.AUTO_RENDER:
+        if not config.AUTO_RENDER or exc.code not in config.AUTO_RENDER_ON:
             raise
         if not render_mod.playwright_available():
             raise
@@ -98,9 +98,9 @@ async def fetch_ready_page(
             if render_exc.code == RENDER_UNAVAILABLE:
                 raise exc from render_exc
             raise
-        _accept_page(rendered)
-        return rendered, 1
-    return page, 0
+        _accept_page(rendered.page)
+        return rendered.page, 1, rendered.cookies
+    return page, 0, None
 
 
 async def extract_page(
@@ -114,7 +114,7 @@ async def extract_page(
     profiles: ProfileRegistry | None = None,
 ) -> ExtractResponse:
     requested = (url or "").strip()
-    page, _auto_render = await fetch_ready_page(
+    page, _auto_render, _browser_cookies = await fetch_ready_page(
         requested,
         client,
         headers=headers,
@@ -163,10 +163,12 @@ def _log_extract(
     profile: str,
     qps_wait_ms: float,
     auto_render: int,
+    session_persist: str,
 ) -> None:
     # Structured fields only: never log Cookie / Authorization / cookies / session plaintext / proxy userinfo.
     logger.info(
-        "extract url=%s cache=%s latency_ms=%.2f error_code=%s session=%s profile=%s qps_wait_ms=%.2f auto_render=%s",
+        "extract url=%s cache=%s latency_ms=%.2f error_code=%s session=%s profile=%s "
+        "qps_wait_ms=%.2f auto_render=%s session_persist=%s",
         url,
         cache_status or "-",
         latency_ms,
@@ -175,6 +177,7 @@ def _log_extract(
         profile or "-",
         qps_wait_ms,
         1 if auto_render else 0,
+        session_persist,
     )
 
 
@@ -217,6 +220,7 @@ async def run_extract(
     entered_inflight = False
     qps_wait_ms = 0.0
     auto_render = 0
+    session_persist = "0"
 
     def finish_log() -> None:
         latency_ms = (time.perf_counter() - t0) * 1000.0
@@ -230,11 +234,11 @@ async def run_extract(
             profile=profile_label,
             qps_wait_ms=qps_wait_ms,
             auto_render=auto_render,
+            session_persist=session_persist,
         )
 
     try:
-        session = load_session(session_id)
-        merged = merge_session_material(session, cookies, headers)
+        merged = resolve_session_material(requested, session_id, cookies, headers)
         safe_headers = filter_request_headers(merged.headers)
         safe_cookies = dict(merged.cookies)
         fingerprint = session_fingerprint(safe_headers, safe_cookies)
@@ -273,7 +277,7 @@ async def run_extract(
         stats.record_cache_miss()
         upstream_headers = headers_for_upstream(safe_headers, strategy)
         async with semaphore:
-            page, auto_render = await fetch_ready_page(
+            page, auto_render, browser_cookies = await fetch_ready_page(
                 requested,
                 client,
                 headers=upstream_headers or None,
@@ -282,6 +286,11 @@ async def run_extract(
             )
             if auto_render:
                 stats.record_auto_render()
+            session_persist = persist_auto_session(
+                requested,
+                browser_cookies,
+                session_id_provided=session_id is not None,
+            )
             result = _extract_response(
                 page,
                 requested=requested,
@@ -362,8 +371,7 @@ async def run_suggest(
     auto_render = 0
 
     try:
-        session = load_session(session_id)
-        merged = merge_session_material(session, cookies, headers)
+        merged = resolve_session_material(requested, session_id, cookies, headers)
         safe_headers = filter_request_headers(merged.headers)
         safe_cookies = dict(merged.cookies)
         fingerprint = session_fingerprint(safe_headers, safe_cookies)
@@ -379,7 +387,7 @@ async def run_suggest(
         entered_inflight = True
         upstream_headers = headers_for_upstream(safe_headers, "default")
         async with semaphore:
-            page, auto_render = await fetch_ready_page(
+            page, auto_render, _browser_cookies = await fetch_ready_page(
                 requested,
                 client,
                 headers=upstream_headers or None,

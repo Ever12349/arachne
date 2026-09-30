@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,6 +27,18 @@ class SessionMaterial:
 
 def _sessions_dir() -> Path:
     return Path(config.SESSIONS_DIR).expanduser()
+
+
+def session_key_usable() -> bool:
+    """True when `ARACHNE_SESSION_KEY` is a non-empty Fernet key. Does not log the key."""
+    raw = config.SESSION_KEY
+    if raw is None or not str(raw).strip():
+        return False
+    try:
+        Fernet(str(raw).strip().encode("ascii"))
+    except (UnicodeEncodeError, ValueError, TypeError):
+        return False
+    return True
 
 
 def _session_key_bytes() -> bytes:
@@ -126,10 +141,25 @@ def write_session_file(
     directory: Path | str | None = None,
     key: bytes | None = None,
 ) -> Path:
-    """Encrypt `{cookies, headers}` and write `{id}.bin`. Used by scripts/write_session.py."""
+    """Encrypt `{cookies, headers}` and atomically write `{id}.bin`.
+
+    The ciphertext is written to a temporary file in the same directory, then
+    moved into place with `os.replace`. A failure leaves any previous file unchanged.
+    """
     parse_session_payload({"cookies": cookies, "headers": headers})
     base = Path(directory) if directory is not None else _sessions_dir()
     base.mkdir(parents=True, exist_ok=True)
     path = session_file_path(session_id, directory=base)
-    path.write_bytes(encrypt_session_payload(cookies, headers, key=key))
+    payload = encrypt_session_payload(cookies, headers, key=key)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{session_id}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    except Exception:
+        with suppress(OSError):
+            os.unlink(tmp_name)
+        raise
     return path

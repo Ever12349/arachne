@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from app import config
 from app.errors import ArachneError, render_failed, render_unavailable
@@ -11,6 +12,29 @@ from app.proxy_util import playwright_proxy
 from app.ssrf import assert_public_http_url
 
 logger = logging.getLogger("arachne")
+
+
+@dataclass(frozen=True)
+class RenderedPage:
+    """Browser fetch plus the cookie jar captured before the context closes."""
+
+    page: FetchedPage
+    cookies: dict[str, str]
+
+
+def flatten_playwright_cookies(raw: object) -> dict[str, str]:
+    """name → value. The same name later in the list wins. Domain is not filtered."""
+    if not isinstance(raw, list):
+        return {}
+    out: dict[str, str] = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        value = item.get("value")
+        if isinstance(name, str) and isinstance(value, str):
+            out[name] = value
+    return out
 
 
 def playwright_available() -> bool:
@@ -26,7 +50,7 @@ async def render_url(
     *,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
-) -> FetchedPage:
+) -> RenderedPage:
     """Headless Chromium goto(wait_until=domcontentloaded).
 
     SSRF-checks the URL (scheme, public IP, egress allowlist) first. The browser
@@ -74,12 +98,16 @@ async def render_url(
                 content_type = "text/html"
                 if response is not None:
                     content_type = response.headers.get("content-type") or "text/html"
-                return FetchedPage(
-                    requested_url=url,
-                    final_url=final_url,
-                    status_code=status_code,
-                    content_type=content_type,
-                    body=html,
+                browser_cookies = flatten_playwright_cookies(await context.cookies())
+                return RenderedPage(
+                    page=FetchedPage(
+                        requested_url=url,
+                        final_url=final_url,
+                        status_code=status_code,
+                        content_type=content_type,
+                        body=html,
+                    ),
+                    cookies=browser_cookies,
                 )
             finally:
                 await browser.close()

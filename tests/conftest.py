@@ -101,7 +101,7 @@ def _isolated_job_db(tmp_path, monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture(autouse=True)
-def _p7_safe_defaults(monkeypatch: pytest.MonkeyPatch):
+def _p7_safe_defaults(tmp_path, monkeypatch: pytest.MonkeyPatch):
     """Keep existing tests anonymous; allow profile writes unless a test opts out."""
     monkeypatch.setattr("app.config.REQUIRE_AUTH", False)
     monkeypatch.setattr("app.config.API_KEYS", ())
@@ -115,6 +115,13 @@ def _p7_safe_defaults(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("app.config.QPS_MODE", "queue")
     monkeypatch.setattr("app.config.QPS_WAIT_SECONDS", 0.0)
     monkeypatch.setattr("app.config.AUTO_RENDER", True)
+    monkeypatch.setattr(
+        "app.config.AUTO_RENDER_ON",
+        frozenset({"challenge_detected", "unauthorized_upstream"}),
+    )
+    monkeypatch.setattr("app.config.SESSION_PERSIST", True)
+    monkeypatch.setattr("app.config.SESSION_KEY", "")
+    monkeypatch.setattr("app.config.SESSIONS_DIR", str(tmp_path / "sessions"))
     monkeypatch.setattr("app.config.HTTP_PROXY", "")
 
 
