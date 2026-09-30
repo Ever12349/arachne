@@ -9,6 +9,7 @@ import pytest
 from app.cache import ResultCache, cache_key
 from app.errors import ArachneError, render_unavailable
 from app.fetch import FetchedPage
+from app.render import RenderedPage
 from app.limits import FixedWindowRateLimiter, Stats
 from app.metrics import AUTO_RENDERS_TOTAL
 from app.profiles.models import SuggestEvidence, SuggestResponse
@@ -17,14 +18,23 @@ from app.service import run_extract, run_suggest
 from tests.conftest import CHALLENGE_CF_HTML, SAMPLE_HTML
 
 
-def _page(body: str, url: str = "https://example.com/article") -> FetchedPage:
+def _page(
+    body: str,
+    url: str = "https://example.com/article",
+    *,
+    status_code: int = 200,
+) -> FetchedPage:
     return FetchedPage(
         requested_url=url,
         final_url=url,
-        status_code=200,
+        status_code=status_code,
         content_type="text/html; charset=utf-8",
         body=body,
     )
+
+
+def _rendered(page: FetchedPage, cookies: dict[str, str] | None = None) -> RenderedPage:
+    return RenderedPage(page=page, cookies=dict(cookies or {}))
 
 
 def _suggest() -> SuggestResponse:
@@ -68,10 +78,10 @@ async def test_auto_render_success_caches_render_bit_and_one_qps_slot(
         calls["fetch"] += 1
         return _page(CHALLENGE_CF_HTML)
 
-    async def fake_render(url: str, **_kwargs) -> FetchedPage:
+    async def fake_render(url: str, **_kwargs) -> RenderedPage:
         assert sem.locked()
         calls["render"] += 1
-        return _page(SAMPLE_HTML, url)
+        return _rendered(_page(SAMPLE_HTML, url))
 
     monkeypatch.setattr("app.service.fetch_with_retries", fake_fetch)
     monkeypatch.setattr("app.service.render_url", fake_render)
@@ -121,7 +131,7 @@ async def test_auto_render_skipped_without_playwright(monkeypatch: pytest.Monkey
     async def fake_fetch(*_args, **_kwargs) -> FetchedPage:
         return _page(CHALLENGE_CF_HTML)
 
-    async def fake_render(*_args, **_kwargs) -> FetchedPage:
+    async def fake_render(*_args, **_kwargs) -> RenderedPage:
         raise AssertionError("render must not run")
 
     monkeypatch.setattr("app.service.fetch_with_retries", fake_fetch)
@@ -148,7 +158,7 @@ async def test_auto_render_unavailable_keeps_original_challenge(monkeypatch: pyt
     async def fake_fetch(*_args, **_kwargs) -> FetchedPage:
         return _page(CHALLENGE_CF_HTML)
 
-    async def fake_render(*_args, **_kwargs) -> FetchedPage:
+    async def fake_render(*_args, **_kwargs) -> RenderedPage:
         raise render_unavailable()
 
     monkeypatch.setattr("app.service.fetch_with_retries", fake_fetch)
@@ -171,8 +181,8 @@ async def test_explicit_render_does_not_fetch_first(monkeypatch: pytest.MonkeyPa
     async def fake_fetch(*_args, **_kwargs) -> FetchedPage:
         raise AssertionError("explicit render must not use httpx first")
 
-    async def fake_render(url: str, **_kwargs) -> FetchedPage:
-        return _page(SAMPLE_HTML, url)
+    async def fake_render(url: str, **_kwargs) -> RenderedPage:
+        return _rendered(_page(SAMPLE_HTML, url))
 
     monkeypatch.setattr("app.service.fetch_with_retries", fake_fetch)
     monkeypatch.setattr("app.service.render_url", fake_render)
@@ -192,8 +202,8 @@ async def test_explicit_render_does_not_fetch_first(monkeypatch: pytest.MonkeyPa
 
 
 async def test_explicit_render_cache_bit_stays_one(monkeypatch: pytest.MonkeyPatch):
-    async def fake_render(url: str, **_kwargs) -> FetchedPage:
-        return _page(SAMPLE_HTML, url)
+    async def fake_render(url: str, **_kwargs) -> RenderedPage:
+        return _rendered(_page(SAMPLE_HTML, url))
 
     monkeypatch.setattr("app.service.render_url", fake_render)
     cache = ResultCache()
@@ -219,9 +229,9 @@ async def test_suggest_auto_renders_on_challenge(monkeypatch: pytest.MonkeyPatch
         calls["fetch"] += 1
         return _page(CHALLENGE_CF_HTML)
 
-    async def fake_render(url: str, **_kwargs) -> FetchedPage:
+    async def fake_render(url: str, **_kwargs) -> RenderedPage:
         calls["render"] += 1
-        return _page(SAMPLE_HTML, url)
+        return _rendered(_page(SAMPLE_HTML, url))
 
     async def fake_suggest(_html: str, *, url: str, strategy: str) -> SuggestResponse:
         assert url == "https://example.com/article"
@@ -252,8 +262,8 @@ async def test_suggest_explicit_render_skips_httpx(monkeypatch: pytest.MonkeyPat
     async def fake_fetch(*_args, **_kwargs) -> FetchedPage:
         raise AssertionError("explicit render must not use httpx first")
 
-    async def fake_render(url: str, **_kwargs) -> FetchedPage:
-        return _page(SAMPLE_HTML, url)
+    async def fake_render(url: str, **_kwargs) -> RenderedPage:
+        return _rendered(_page(SAMPLE_HTML, url))
 
     async def fake_suggest(_html: str, *, url: str, strategy: str) -> SuggestResponse:
         return _suggest()
@@ -272,3 +282,122 @@ async def test_suggest_explicit_render_skips_httpx(monkeypatch: pytest.MonkeyPat
     )
     assert result.profile.id == "example-com"
     assert stats.auto_renders == 0
+
+
+def _both_codes() -> frozenset[str]:
+    return frozenset({"challenge_detected", "unauthorized_upstream"})
+
+
+async def _extract(monkeypatch: pytest.MonkeyPatch, stats: Stats, **kwargs: object):
+    return await run_extract(
+        url="https://example.com/article",
+        client=None,  # type: ignore[arg-type]
+        cache=ResultCache(),
+        limiter=_Limiter(),
+        semaphore=asyncio.Semaphore(1),
+        stats=stats,
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
+async def test_unauthorized_auto_renders_when_enabled(monkeypatch: pytest.MonkeyPatch):
+    calls = {"fetch": 0, "render": 0}
+
+    async def fake_fetch(*_args, **_kwargs) -> FetchedPage:
+        calls["fetch"] += 1
+        return _page(SAMPLE_HTML, status_code=401)
+
+    async def fake_render(url: str, **_kwargs) -> RenderedPage:
+        calls["render"] += 1
+        return _rendered(_page(SAMPLE_HTML, url))
+
+    monkeypatch.setattr("app.service.fetch_with_retries", fake_fetch)
+    monkeypatch.setattr("app.service.render_url", fake_render)
+    monkeypatch.setattr("app.render.playwright_available", lambda: True)
+    monkeypatch.setattr("app.config.AUTO_RENDER", True)
+    monkeypatch.setattr("app.config.AUTO_RENDER_ON", _both_codes())
+    stats = Stats()
+    result = await _extract(monkeypatch, stats, render=False)
+    assert result.title
+    assert calls == {"fetch": 1, "render": 1}
+    assert stats.auto_renders == 1
+
+
+async def test_unauthorized_not_rendered_when_only_challenge(monkeypatch: pytest.MonkeyPatch):
+    async def fake_fetch(*_args, **_kwargs) -> FetchedPage:
+        return _page(SAMPLE_HTML, status_code=403)
+
+    async def fake_render(*_args, **_kwargs) -> RenderedPage:
+        raise AssertionError("render must not run")
+
+    monkeypatch.setattr("app.service.fetch_with_retries", fake_fetch)
+    monkeypatch.setattr("app.service.render_url", fake_render)
+    monkeypatch.setattr("app.render.playwright_available", lambda: True)
+    monkeypatch.setattr("app.config.AUTO_RENDER", True)
+    monkeypatch.setattr("app.config.AUTO_RENDER_ON", frozenset({"challenge_detected"}))
+    stats = Stats()
+    with pytest.raises(ArachneError) as exc:
+        await _extract(monkeypatch, stats, render=False)
+    assert exc.value.code == "unauthorized_upstream"
+    assert stats.auto_renders == 0
+
+
+async def test_auto_render_off_keeps_challenge(monkeypatch: pytest.MonkeyPatch):
+    async def fake_fetch(*_args, **_kwargs) -> FetchedPage:
+        return _page(CHALLENGE_CF_HTML)
+
+    async def fake_render(*_args, **_kwargs) -> RenderedPage:
+        raise AssertionError("render must not run")
+
+    monkeypatch.setattr("app.service.fetch_with_retries", fake_fetch)
+    monkeypatch.setattr("app.service.render_url", fake_render)
+    monkeypatch.setattr("app.render.playwright_available", lambda: True)
+    monkeypatch.setattr("app.config.AUTO_RENDER", False)
+    monkeypatch.setattr("app.config.AUTO_RENDER_ON", _both_codes())
+    stats = Stats()
+    with pytest.raises(ArachneError) as exc:
+        await _extract(monkeypatch, stats, render=False)
+    assert exc.value.code == "challenge_detected"
+    assert stats.auto_renders == 0
+
+
+async def test_unauthorized_without_playwright_keeps_original(monkeypatch: pytest.MonkeyPatch):
+    async def fake_fetch(*_args, **_kwargs) -> FetchedPage:
+        return _page("<html><body>login</body></html>", status_code=401)
+
+    async def fake_render(*_args, **_kwargs) -> RenderedPage:
+        raise AssertionError("render must not run")
+
+    monkeypatch.setattr("app.service.fetch_with_retries", fake_fetch)
+    monkeypatch.setattr("app.service.render_url", fake_render)
+    monkeypatch.setattr("app.render.playwright_available", lambda: False)
+    monkeypatch.setattr("app.config.AUTO_RENDER", True)
+    monkeypatch.setattr("app.config.AUTO_RENDER_ON", _both_codes())
+    stats = Stats()
+    with pytest.raises(ArachneError) as exc:
+        await _extract(monkeypatch, stats, render=False)
+    assert exc.value.code == "unauthorized_upstream"
+    assert exc.value.code != "render_unavailable"
+    assert stats.auto_renders == 0
+
+
+def test_auto_render_on_csv(monkeypatch: pytest.MonkeyPatch):
+    from app.config import auto_render_on_codes
+
+    monkeypatch.delenv("ARACHNE_AUTO_RENDER_ON", raising=False)
+    assert auto_render_on_codes() == _both_codes()
+
+    monkeypatch.setenv("ARACHNE_AUTO_RENDER_ON", "")
+    assert auto_render_on_codes() == frozenset()
+
+    monkeypatch.setenv("ARACHNE_AUTO_RENDER_ON", "   ")
+    assert auto_render_on_codes() == frozenset()
+
+    monkeypatch.setenv("ARACHNE_AUTO_RENDER_ON", "challenge,nope,UNAUTHORIZED")
+    assert auto_render_on_codes() == _both_codes()
+
+    monkeypatch.setenv("ARACHNE_AUTO_RENDER_ON", "challenge")
+    assert auto_render_on_codes() == frozenset({"challenge_detected"})
+
+    monkeypatch.setenv("ARACHNE_AUTO_RENDER_ON", "challenge_detected")
+    assert auto_render_on_codes() == frozenset()

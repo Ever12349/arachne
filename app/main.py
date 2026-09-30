@@ -1,4 +1,4 @@
-"""Arachne P8: URL → structured JSON extract. QPS queue, env proxy, and auto-render stay server-side."""
+"""Arachne: URL → structured JSON extract. Auto-render and auto sessions stay server-side."""
 
 from __future__ import annotations
 
@@ -91,11 +91,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="arachne",
-    version="0.9.0",
+    version="0.10.0",
     description=(
         "URL → structured JSON extract for AI agents. Single-instance intranet sidecar "
         "with optional API-key auth, SQLite-backed batch jobs, profile suggest, "
-        "queued QPS, an optional HTTP proxy, and automatic Playwright fallback."
+        "queued QPS, an optional HTTP proxy, automatic Playwright fallback, "
+        "and optional Fernet reuse of browser cookies."
     ),
     lifespan=lifespan,
     dependencies=[Depends(enforce_auth)],
