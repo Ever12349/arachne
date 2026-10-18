@@ -6,8 +6,11 @@
 #   ARACHNE_HTTP_PROXY         empty = direct. http(s) URL for httpx and Playwright. No request-body proxy.
 #   ARACHNE_QPS_MODE           queue (default) | reject. queue waits for the 1s window; reject is immediate 429.
 #   ARACHNE_QPS_WAIT_SECONDS   default 30. <=0 does not wait (immediate 429 when the window is full).
-#   ARACHNE_AUTO_RENDER        default true. challenge_detected with render=false retries once via Playwright
+#   ARACHNE_AUTO_RENDER        default true. render=false plus a code in AUTO_RENDER_ON retries once via Playwright
 #                              when it is installed. The JSON body is unchanged.
+#   ARACHNE_AUTO_RENDER_ON     default challenge,unauthorized. Explicit empty selects no codes. Unknown tokens ignored.
+#   ARACHNE_SESSION_PERSIST    default true. After an accepted browser page, non-empty cookies may be written to
+#                              auto-<host>.bin. Reuse needs a valid ARACHNE_SESSION_KEY. false disables writes only.
 #
 # Default `docker compose up` builds the slim image (no Chromium).
 # Playwright image: docker compose --profile playwright up --build arachne-playwright

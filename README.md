@@ -6,7 +6,30 @@ The service fetches HTML with `httpx` (optional headless Playwright) and extract
 
 This is a **trusted single-instance / intranet sidecar**. Do not run multiple replicas (SQLite + in-process worker). Terminate TLS at a reverse proxy; the app speaks HTTP. Optional shared API keys are not OAuth and are not bound to a client.
 
-API contract version **0.9.0**.
+API contract version **0.10.0**.
+
+## Caller contract
+
+Arachne is an AI-agent service: one URL in, one structured page out (`title`, `main_text`, metadata, links, content-area `images`). The primary call stays `POST /extract`. There is no `/browse` API. `POST /jobs` runs the same fetch once per item.
+
+Access when `render` is omitted or `false`:
+
+1. httpx fetches the page. A successful fetch returns immediately.
+2. If that attempt's error code is in `ARACHNE_AUTO_RENDER_ON`, auto-render is on, and Playwright imports, the server tries Playwright **once** (same QPS slot, same concurrency slot).
+3. `render: true` skips httpx and uses Playwright only.
+
+| Knob | Default | What the caller should assume |
+|------|---------|-------------------------------|
+| `ARACHNE_AUTO_RENDER` | `true` | Master switch for that one Playwright retry |
+| `ARACHNE_AUTO_RENDER_ON` | `challenge,unauthorized` | `challenge` → `challenge_detected`; `unauthorized` → `unauthorized_upstream`. Explicit empty selects no codes. Unknown tokens are ignored |
+| `ARACHNE_SESSION_PERSIST` | `true` | After an accepted browser page, non-empty cookies may be written to Fernet `auto-<host>`. `false` disables writes only |
+| `ARACHNE_SESSION_KEY` | empty | Required to load `session_id` and to reuse `auto-<host>`. The server does not generate a key |
+| `ARACHNE_HTTP_PROXY` | empty | Optional http(s) proxy for httpx and Playwright. Empty is off |
+| `ARACHNE_QPS` / `ARACHNE_QPS_MODE` / `ARACHNE_QPS_WAIT_SECONDS` | `5` / `queue` / `30` | Global extract rate limit. `queue` waits; `reject` returns `rate_limited` immediately |
+
+CAPTCHA pages and login walls still need a human. Arachne does not solve captchas, log in, or ship challenge-bypass tooling. A soft-wall retry is one extra fetch, not a guarantee that a site will succeed.
+
+Stateful browser sessions (multi-step navigation, handing a live browser to a person) are deferred. An external browser pool is not planned.
 
 ## Install
 
@@ -45,12 +68,15 @@ export ARACHNE_MAX_CONCURRENCY=10
 export ARACHNE_QPS=5
 export ARACHNE_QPS_MODE=queue             # queue (default) | reject
 export ARACHNE_QPS_WAIT_SECONDS=30        # queue only; <=0 does not wait
-export ARACHNE_AUTO_RENDER=true           # challenge page → one Playwright try when installed
+export ARACHNE_AUTO_RENDER=true           # soft-wall codes → one Playwright try when installed
+export ARACHNE_AUTO_RENDER_ON=challenge,unauthorized
+# explicit empty ARACHNE_AUTO_RENDER_ON selects no codes; unknown tokens are ignored
+export ARACHNE_SESSION_PERSIST=true       # write auto-<host> after an accepted browser page
 export ARACHNE_HTTP_PROXY=                # empty = off; http(s) proxy for httpx and Playwright
 export ARACHNE_CACHE_TTL_SECONDS=60
 export ARACHNE_CACHE_MAXSIZE=256
 export ARACHNE_SESSIONS_DIR=./data/sessions
-export ARACHNE_SESSION_KEY=""          # Fernet key; required to load session_id
+export ARACHNE_SESSION_KEY=""          # Fernet key; required to load session_id and to reuse auto-<host>
 export ARACHNE_MAX_RETRIES=2
 export ARACHNE_RETRY_BACKOFF_SECONDS=0.5,1
 export ARACHNE_RENDER_TIMEOUT=15
@@ -213,6 +239,10 @@ python scripts/write_session.py --id demo \
 That writes `./data/sessions/demo.bin`. POST `{"session_id":"demo", ...}` loads it. Session cookies/headers are the base; the JSON body overrides; then the header allowlist runs (`Cookie` still only via the cookies map).
 
 `session_id` must match `^[A-Za-z0-9_-]{1,64}$`. Missing key, bad id, missing file, or decrypt failure all return `session_invalid` (400) with a generic message.
+
+When the request omits `session_id`, the server may also load `auto-<host>.bin` for the **requested** URL host (`www.` stripped, then the same dash cleaning as a profile id, prefixed with `auto-`, cut to 64 characters). Body cookies and headers still win. A corrupt or undecryptable auto file is ignored (`auto_session=ignored_invalid`) and does not 400. A provided `session_id` uses only that file: the auto file is not read and is not updated.
+
+After Playwright accepts a page (`render: true`, or a successful auto-render) and the cookie jar is non-empty, `ARACHNE_SESSION_PERSIST` (default true) writes that jar to the auto file with headers `{}`. The write is atomic. Empty jars and failed fetches leave the previous file alone. This happens even if title/main extraction later fails. Suggest may read an auto file and does not write one. `ARACHNE_SESSION_PERSIST=false` disables writes only. Without a valid `ARACHNE_SESSION_KEY` the write is skipped (`session_persist=skipped_no_key`) and the extract can still succeed; a later request will not reuse those cookies until a key is configured. The server does not generate a key. Logs never include cookie or Authorization plaintext.
 
 ## Site profiles
 
@@ -383,7 +413,7 @@ POST headers are allowlisted: `Authorization`, `Accept`, `Accept-Language`, `Use
 
 Timeouts and connection errors are retried (`ARACHNE_MAX_RETRIES=2`, backoff 0.5s then 1s). 4xx and challenge pages are not retried. 2xx HTML or 401/403 bodies that match high-precision challenge markers (`cf-challenge`, `_cf_chl`, `just a moment`, `attention required`, …) are `challenge_detected` (403). Other 401/403 stay `unauthorized_upstream` (502).
 
-`ARACHNE_AUTO_RENDER` defaults to on. A request with `render: false` that hits `challenge_detected` is fetched again with Playwright when Playwright imports, inside the same concurrency slot and the same QPS acquire. Success is cached with the render bit set (the JSON body has no `render_used` field). If Playwright is not installed, the original `challenge_detected` is returned and is not rewritten to `render_unavailable`. `render: true` still uses the browser only. `unauthorized_upstream` and `extract_empty` are not auto-rendered. The same fetch path applies to `POST /profiles/suggest`.
+`ARACHNE_AUTO_RENDER` defaults to on. `ARACHNE_AUTO_RENDER_ON` is a CSV of `challenge` and/or `unauthorized` (default `challenge,unauthorized`). Unknown tokens are ignored. An explicit empty value selects no codes, so auto-render stays off even when `ARACHNE_AUTO_RENDER` is true. `challenge` means `challenge_detected`. `unauthorized` means `unauthorized_upstream` (401/403 that are not challenge pages). A request with `render: false` whose httpx result is one of those codes is fetched again with Playwright when Playwright imports, inside the same concurrency slot and the same QPS acquire. Success is cached with the render bit set and counted on the existing `auto_renders` stat (the JSON body has no new field). If Playwright is not installed, the original error is returned and is not rewritten to `render_unavailable`. `render: true` still uses the browser only and does not increment `auto_renders`. `extract_empty` is not auto-rendered. There is no site allowlist and no captcha solving; a particular site is not guaranteed to succeed. The same fetch path applies to `POST /profiles/suggest` (suggest does not write an auto session).
 
 `ARACHNE_HTTP_PROXY` (empty = off) is the only proxy setting. There is no proxy field on the request body, and `HTTP_PROXY` / `HTTPS_PROXY` are ignored. When set, httpx uses that proxy and does not pin the upstream IP; `assert_public_http_url` and the egress allowlist still run before the fetch. Playwright uses the same proxy. Userinfo in the proxy URL is redacted in logs. An invalid proxy URL fails the client with `fetch_failed`.
 
@@ -540,7 +570,7 @@ How the new P2/P3 codes are verified without a real site or browser:
 | `llm_failed` | Mock LLM selectors that fail lxml self-test with `"strategy":"llm"` (`tests/test_profiles_suggest.py`) |
 | `job_not_found` | `GET` or cancel an unknown / expired job id (`tests/test_jobs.py`) |
 
-`tests/test_extract.py` covers content-area `images` (relative→absolute, tracker skip, dedupe/cap, empty list, `og.image` not merged). `tests/test_jobs.py` covers create / poll / cancel / per-item errors / QPS. `tests/test_jobs_persistence.py` covers SQLite reopen, URL search, delete, `X-Arachne-Client` isolation, and TTL cleanup. `tests/test_profiles_suggest.py` covers heuristic suggest, `llm_unavailable`, mocked LLM verify/fail, auto fallback, and that suggest does not write disk. `tests/test_profiles_write.py` covers 409 / overwrite / hot-reload after write and the `ARACHNE_PROFILES_WRITE` gate. `tests/test_auth.py`, `tests/test_ready.py`, `tests/test_egress.py`, and `tests/test_transport.py` cover P7a auth, readiness, allowlist, and pin-IP. `tests/test_qps_queue.py`, `tests/test_auto_render.py`, and `tests/test_proxy_client.py` cover 0.9.0 queue / reject, auto-render, and the proxy client branch (no live network).
+`tests/test_extract.py` covers content-area `images` (relative→absolute, tracker skip, dedupe/cap, empty list, `og.image` not merged). `tests/test_jobs.py` covers create / poll / cancel / per-item errors / QPS. `tests/test_jobs_persistence.py` covers SQLite reopen, URL search, delete, `X-Arachne-Client` isolation, and TTL cleanup. `tests/test_profiles_suggest.py` covers heuristic suggest, `llm_unavailable`, mocked LLM verify/fail, auto fallback, and that suggest does not write disk. `tests/test_profiles_write.py` covers 409 / overwrite / hot-reload after write and the `ARACHNE_PROFILES_WRITE` gate. `tests/test_auth.py`, `tests/test_ready.py`, `tests/test_egress.py`, and `tests/test_transport.py` cover P7a auth, readiness, allowlist, and pin-IP. `tests/test_qps_queue.py`, `tests/test_auto_render.py`, `tests/test_auto_session.py`, and `tests/test_proxy_client.py` cover queue / reject, auto-render (including `unauthorized_upstream`), Fernet `auto-<host>` reuse, and the proxy client branch (no live network).
 
 `tests/test_jobs.py` covers create 202, per-item failure still `completed`, cancel, `job_not_found`, max URLs, and that creating a job does not burn QPS.
 

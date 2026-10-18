@@ -157,7 +157,7 @@ async def test_run_extract_records_qps_wait(monkeypatch: pytest.MonkeyPatch):
     stats = Stats()
 
     async def fake_fetch(*_args, **_kwargs):
-        return _page(), 0
+        return _page(), 0, None
 
     monkeypatch.setattr("app.service.fetch_ready_page", fake_fetch)
     kwargs = dict(
@@ -202,7 +202,7 @@ async def test_rate_limited_log_includes_wait_ms(monkeypatch: pytest.MonkeyPatch
     box["limiter"] = limiter
 
     async def fake_fetch(*_args, **_kwargs):
-        return _page(), 0
+        return _page(), 0, None
 
     monkeypatch.setattr("app.service.fetch_ready_page", fake_fetch)
     stats = Stats()

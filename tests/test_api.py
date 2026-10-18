@@ -19,7 +19,7 @@ def test_health(api_client: TestClient):
 
 def test_openapi_version(api_client: TestClient):
     spec = api_client.get("/openapi.json").json()
-    assert spec["info"]["version"] == "0.9.0"
+    assert spec["info"]["version"] == "0.10.0"
 
 
 def test_request_id_generated_and_echoed(api_client: TestClient):

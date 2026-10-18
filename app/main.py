@@ -1,4 +1,4 @@
-"""Arachne P8: URL → structured JSON extract. QPS queue, env proxy, and auto-render stay server-side."""
+"""Arachne: URL → structured JSON extract. Auto-render and auto sessions stay server-side."""
 
 from __future__ import annotations
 
@@ -91,11 +91,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="arachne",
-    version="0.9.0",
+    version="0.10.0",
     description=(
-        "URL → structured JSON extract for AI agents. Single-instance intranet sidecar "
-        "with optional API-key auth, SQLite-backed batch jobs, profile suggest, "
-        "queued QPS, an optional HTTP proxy, and automatic Playwright fallback."
+        "AI-agent service: URL → structured page JSON. Primary API is POST /extract; "
+        "jobs reuse the same fetch. There is no /browse endpoint. "
+        "Access: httpx first; on a soft-wall code in ARACHNE_AUTO_RENDER_ON "
+        "(default challenge and unauthorized), at most one Playwright retry when "
+        "ARACHNE_AUTO_RENDER is on and Playwright is installed. render:true skips httpx. "
+        "CAPTCHA and login walls need a human; no bypass tooling. "
+        "Single-instance intranet sidecar with optional API-key auth, SQLite jobs, "
+        "profile suggest, queued QPS (ARACHNE_QPS / ARACHNE_QPS_MODE), "
+        "optional ARACHNE_HTTP_PROXY, and Fernet auto-<host> sessions "
+        "(ARACHNE_SESSION_PERSIST, ARACHNE_SESSION_KEY)."
     ),
     lifespan=lifespan,
     dependencies=[Depends(enforce_auth)],
@@ -232,7 +239,17 @@ async def extract_get(
     return await _run_extract(request, url, client, max_chars=max_chars)
 
 
-@app.post("/extract", response_model=ExtractResponse, responses=ERROR_RESPONSES)
+@app.post(
+    "/extract",
+    response_model=ExtractResponse,
+    responses=ERROR_RESPONSES,
+    summary="Extract one URL into a structured page",
+    description=(
+        "Primary caller API. render omitted or false: httpx, then at most one "
+        "Playwright retry when the error is in ARACHNE_AUTO_RENDER_ON. "
+        "render true: Playwright only (skips httpx)."
+    ),
+)
 async def extract_post(
     request: Request,
     body: ExtractRequest,

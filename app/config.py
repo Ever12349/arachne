@@ -56,6 +56,19 @@ def _env_csv(name: str) -> tuple[str, ...]:
     return tuple(part.strip() for part in str(raw).split(",") if part.strip())
 
 
+def _env_csv_or_default(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    """Like `_env_csv`, but an unset variable keeps `default`.
+
+    An explicit empty string (or whitespace) is an empty tuple, not `default`.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    if not str(raw).strip():
+        return ()
+    return tuple(part.strip() for part in str(raw).split(",") if part.strip())
+
+
 MAX_IMAGES = _env_int("ARACHNE_MAX_IMAGES", 10)
 
 MAX_CONCURRENCY = _env_int("ARACHNE_MAX_CONCURRENCY", 10)
@@ -73,6 +86,28 @@ def _env_qps_mode() -> str:
 QPS_MODE = _env_qps_mode()
 QPS_WAIT_SECONDS = _env_float("ARACHNE_QPS_WAIT_SECONDS", 30.0)
 AUTO_RENDER = _env_bool("ARACHNE_AUTO_RENDER", True)
+
+# CSV tokens → error codes that may escalate to one Playwright attempt.
+# Unset → both. Explicit empty → no codes. Unknown tokens are ignored.
+_AUTO_RENDER_TOKEN_TO_CODE = {
+    "challenge": "challenge_detected",
+    "unauthorized": "unauthorized_upstream",
+}
+
+
+def auto_render_on_codes() -> frozenset[str]:
+    """Error codes selected by `ARACHNE_AUTO_RENDER_ON` (read from the environment)."""
+    tokens = _env_csv_or_default("ARACHNE_AUTO_RENDER_ON", ("challenge", "unauthorized"))
+    return frozenset(
+        _AUTO_RENDER_TOKEN_TO_CODE[token.lower()]
+        for token in tokens
+        if token.lower() in _AUTO_RENDER_TOKEN_TO_CODE
+    )
+
+
+AUTO_RENDER_ON = auto_render_on_codes()
+# Writes of auto-<host> sessions. Reads stay enabled when this is false.
+SESSION_PERSIST = _env_bool("ARACHNE_SESSION_PERSIST", True)
 # Empty disables proxy. Read only here; callers use app.proxy_util.
 HTTP_PROXY = os.environ.get("ARACHNE_HTTP_PROXY", "").strip()
 CACHE_TTL_SECONDS = _env_int("ARACHNE_CACHE_TTL_SECONDS", 60)
