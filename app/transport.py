@@ -2,6 +2,10 @@
 
 TLS SNI / server_hostname stays the original host; the HTTP Host header is
 unchanged. Playwright is not pinned — see docs/DESIGN.md.
+
+create_http_client() uses this transport only when ARACHNE_HTTP_PROXY is empty.
+A configured proxy uses httpx's proxy transport instead, and still runs
+assert_public_http_url (including the egress allowlist) before the request.
 """
 
 from __future__ import annotations

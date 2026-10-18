@@ -110,6 +110,12 @@ def _p7_safe_defaults(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("app.config.PROFILES_WRITE", True)
     monkeypatch.setattr("app.config.EGRESS_ALLOWLIST", ())
     monkeypatch.setattr("app.config.LOG_JSON", False)
+    # Production default is queue + 30s. Tests that expect an immediate 429
+    # use a zero wait so a full window does not sleep until the next boundary.
+    monkeypatch.setattr("app.config.QPS_MODE", "queue")
+    monkeypatch.setattr("app.config.QPS_WAIT_SECONDS", 0.0)
+    monkeypatch.setattr("app.config.AUTO_RENDER", True)
+    monkeypatch.setattr("app.config.HTTP_PROXY", "")
 
 
 @pytest.fixture(autouse=True)

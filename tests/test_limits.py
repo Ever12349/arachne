@@ -144,7 +144,7 @@ async def test_errors_are_counted(monkeypatch: pytest.MonkeyPatch):
     async def boom(*_args, **_kwargs):
         raise ArachneError("fetch_failed", "nope")
 
-    monkeypatch.setattr("app.service.extract_page", boom)
+    monkeypatch.setattr("app.service.fetch_ready_page", boom)
     with pytest.raises(ArachneError):
         await run_extract(
             url="https://example.com/",

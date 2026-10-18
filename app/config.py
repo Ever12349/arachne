@@ -60,6 +60,21 @@ MAX_IMAGES = _env_int("ARACHNE_MAX_IMAGES", 10)
 
 MAX_CONCURRENCY = _env_int("ARACHNE_MAX_CONCURRENCY", 10)
 QPS = _env_int("ARACHNE_QPS", 5)
+
+
+def _env_qps_mode() -> str:
+    """`reject` is immediate 429. Anything else, including unset or invalid, is `queue`."""
+    raw = os.environ.get("ARACHNE_QPS_MODE")
+    if raw is not None and str(raw).strip().lower() == "reject":
+        return "reject"
+    return "queue"
+
+
+QPS_MODE = _env_qps_mode()
+QPS_WAIT_SECONDS = _env_float("ARACHNE_QPS_WAIT_SECONDS", 30.0)
+AUTO_RENDER = _env_bool("ARACHNE_AUTO_RENDER", True)
+# Empty disables proxy. Read only here; callers use app.proxy_util.
+HTTP_PROXY = os.environ.get("ARACHNE_HTTP_PROXY", "").strip()
 CACHE_TTL_SECONDS = _env_int("ARACHNE_CACHE_TTL_SECONDS", 60)
 CACHE_MAXSIZE = _env_int("ARACHNE_CACHE_MAXSIZE", 256)
 

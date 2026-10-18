@@ -1,8 +1,8 @@
 # arachne 设计文档
 
-> 版本：v0.8.1 · 受众：维护者与调用方（AI Agent 系统）  
+> 版本：v0.9.0 · 受众：维护者与调用方（AI Agent 系统）  
 > 仓库：https://github.com/Ever12349/arachne  
-> 状态：P7a 已落地（单实例 / 内网 sidecar 生产加固：可选 API key、`/ready`、httpx pin-IP、egress allowlist、JSON 日志、Prometheus `/metrics`）。0.8.1 增加正文区域 `images`（**不**与 `metadata.og.image` 合并）。P6 半自动 profiles（`POST /profiles/suggest` + `POST /profiles`）与 P5 SQLite jobs 仍有效。Worker 仍为进程内 asyncio。**不要**多副本（无 Postgres/Redis）。TLS 终止在反向代理，应用本身只讲 HTTP。默认镜像仍不含浏览器。无 OAuth / webhook / 密钥绑定客户端。会话仍为 Fernet 文件。可选 OpenAI 兼容 LLM（`ARACHNE_LLM_*`）仅用于 suggest。
+> 状态：P8′「傻瓜抽取」已落地（调用方仍只 POST `url`；QPS 排队、`ARACHNE_HTTP_PROXY`、挑战页自动 Playwright 都在服务端）。单实例 / 内网 sidecar。P7a（可选 API key、`/ready`、httpx pin-IP、egress allowlist、JSON 日志、Prometheus `/metrics`）与 0.8.1 正文区域 `images` 仍有效。P6 半自动 profiles 与 P5 SQLite jobs 仍有效。Worker 仍为进程内 asyncio。**不要**多副本（无 Postgres/Redis）。TLS 终止在反向代理，应用本身只讲 HTTP。默认镜像仍不含浏览器（Compose profile `playwright` 才构建 `Dockerfile.playwright`）。无 OAuth / webhook / 密钥绑定客户端。会话仍为 Fernet 文件。可选 OpenAI 兼容 LLM（`ARACHNE_LLM_*`）仅用于 suggest。
 
 ## 1. 定位
 
@@ -44,7 +44,7 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 
 ## 3. API 契约（面向 Agent）
 
-契约版本 **0.8.1**。
+契约版本 **0.9.0**。
 
 ### 3.1 端点（P7）
 
@@ -208,11 +208,14 @@ python scripts/write_session.py --id demo \
   "cache_misses": 0,
   "in_flight": 0,
   "latency_ms_sum": 0.0,
-  "latency_ms_count": 0
+  "latency_ms_count": 0,
+  "qps_waits": 0,
+  "qps_wait_ms_sum": 0.0,
+  "auto_renders": 0
 }
 ```
 
-计数只覆盖抽取流水线（含 `rate_limited` / `session_invalid` 等，以及 `POST /profiles/suggest`）。`/health`、`/ready`、`/stats`、`/metrics` 自身不计入。`POST /profiles` 写盘不计入。同一套计数双写到 Prometheus（`GET /metrics`）：`arachne_requests_total`、`arachne_errors_total{code=}`、`arachne_in_flight`、`arachne_cache_hits_total`、`arachne_cache_misses_total`、`arachne_request_latency_seconds`（Histogram，秒）。
+计数只覆盖抽取流水线（含 `rate_limited` / `session_invalid` 等，以及 `POST /profiles/suggest`）。`/health`、`/ready`、`/stats`、`/metrics` 自身不计入。`POST /profiles` 写盘不计入。同一套计数双写到 Prometheus（`GET /metrics`）：`arachne_requests_total`、`arachne_errors_total{code=}`、`arachne_in_flight`、`arachne_cache_hits_total`、`arachne_cache_misses_total`、`arachne_request_latency_seconds`（Histogram，秒）。0.9.0 追加：`qps_waits` → `arachne_qps_waits_total`；`qps_wait_ms_sum`（毫秒）→ `arachne_qps_wait_seconds_sum`（Histogram 的 `_sum`，**秒**）；`auto_renders` → `arachne_auto_renders_total`。`qps_waits` 只在实际等待（`wait_ms > 0`）时 +1。
 
 ### 3.6 调用约定（给 Agent 集成）
 
@@ -220,8 +223,8 @@ python scripts/write_session.py --id demo \
 - 设置客户端超时略大于服务端读超时 / 渲染超时（建议服务端 15s，Agent 侧 ≥ 20s；`render=true` 时按 `ARACHNE_RENDER_TIMEOUT` 再留余量）
 - 把 `main_text` 当作模型上下文的主输入；用 `max_chars` 控制 prompt 体积
 - 同一规范化 URL + 合并后会话指纹 + `render` + `ua_strategy` + `profile_id@version` 在 TTL 内命中进程内缓存（响应体仍无 `cached` 字段）
-- 全局限流：固定 1 秒窗口 QPS=5（可环境变量覆盖）；超出 → `rate_limited` / 429
-- 遇到 `challenge_detected`：换 Cookie、`ua_strategy=rotate` 或 `render=true`（需 Playwright 镜像），不要指望服务端解验证码
+- 全局限流：固定 1 秒窗口 QPS=5。`ARACHNE_QPS_MODE=queue`（默认）在窗口满时睡到下一窗口边界，最长 `ARACHNE_QPS_WAIT_SECONDS`（默认 30）；超时仍 `rate_limited` / 429。`reject` 为立即 429。非法 mode 视为 `queue`。`wait<=0` 不等待。每次 `run_extract` / `run_suggest` 只 acquire 一次
+- 遇到 `challenge_detected`：默认 `ARACHNE_AUTO_RENDER=true` 时，若请求 `render=false` 且本机能 import Playwright，服务端在同一次 semaphore 持有内再渲染一次（不占第二个 QPS 名额）。未安装 Playwright 则原样返回 `challenge_detected`，不改成 `render_unavailable`。显式 `render=true` 只走浏览器。调用方仍可换 Cookie、`ua_strategy=rotate`。不要指望服务端解验证码。`unauthorized_upstream` / `extract_empty` 不自动渲染
 - 遇到 `session_invalid`：检查 id、密钥、会话文件；不要把密钥放进 prompt
 
 ### 3.7 防御性反爬（P2）
@@ -237,12 +240,12 @@ python scripts/write_session.py --id demo \
 
 ### 3.8 可选渲染 `render`（仅 POST）
 
-- `render: false`（默认）：httpx 拉取
-- `true` 且未安装 Playwright → `render_unavailable`（501）。默认 `requirements.txt` / `Dockerfile` **不含**浏览器；Playwright 动态 import，缺包时进程仍能启动
+- `render: false`（默认）：httpx 拉取。若结果为 `challenge_detected` 且 `ARACHNE_AUTO_RENDER`（默认 true）且 `playwright_available()`：同一 helper 内再走一次 Playwright，成功则 `auto_render=1`（只写日志与 `/stats`，**响应不加字段**）。缓存写入时 render 位为 **1**（本次查找键仍按请求的 `render=false`）。Playwright 不可用则跳过回退，返回原来的 `challenge_detected`
+- `true` 且未安装 Playwright → `render_unavailable`（501）。默认 `requirements.txt` / `Dockerfile` **不含**浏览器；Playwright 动态 import，缺包时进程仍能启动。显式 `render=true` **不**先走 httpx
 - `true` 且已安装：headless Chromium，`goto(..., wait_until="domcontentloaded")`，超时 `ARACHNE_RENDER_TIMEOUT` 默认 15s；**仍做 SSRF 检查**；得到 HTML 后走同一套挑战检测 + 抽取
-- 渲染失败（启动/导航/超时等）→ `render_failed`（502），不映射为通用 `timeout`
-- 渲染走**同一**抽取 `asyncio.Semaphore`
-- 独立依赖：`requirements-playwright.txt` + `Dockerfile.playwright`
+- 渲染失败（启动/导航/超时等）→ `render_failed`（502），不映射为通用 `timeout`。自动渲染路径上若意外得到 `render_unavailable`，改回原来的 `challenge_detected`
+- 渲染（含自动回退）走**同一**抽取 `asyncio.Semaphore`，且不第二次 acquire QPS。`POST /profiles/suggest` 使用同一个 `fetch_ready_page`
+- 独立依赖：`requirements-playwright.txt` + `Dockerfile.playwright`。Compose profile `playwright` 构建该 Dockerfile；默认 `docker compose up` 仍是瘦镜像
 
 ### 3.9 站点 profiles（P3）
 
@@ -569,9 +572,10 @@ profiles/
 - 正文图片最多 `ARACHNE_MAX_IMAGES=10`（不与 `metadata.og.image` 合并）
 - User-Agent：`ARACHNE_USER_AGENT`；POST 调用方或会话可覆盖；`ua_strategy=rotate` 在未显式 UA 时从池中选取
 - 共享 `httpx.AsyncClient`（FastAPI lifespan）
-- 全局固定窗口 QPS=5（`ARACHNE_QPS`）；抽取并发 `asyncio.Semaphore(10)`（`ARACHNE_MAX_CONCURRENCY`），仅 cache miss（含 `render=true`）
+- 全局固定窗口 QPS=5（`ARACHNE_QPS`，窗口 1s，逻辑只在 `app/limits.py`）。`ARACHNE_QPS_MODE=queue|reject`，默认 `queue`；`ARACHNE_QPS_WAIT_SECONDS` 默认 30。`acquire` 返回 `wait_ms`。抽取并发 `asyncio.Semaphore(10)`（`ARACHNE_MAX_CONCURRENCY`），仅 cache miss（含 `render=true` 与自动渲染）
 - 缓存：`TTLCache` TTL=60s、maxsize=256（`ARACHNE_CACHE_TTL_SECONDS`、`ARACHNE_CACHE_MAXSIZE`）
-- 缓存键：规范化 URL（scheme/host 小写、去掉默认端口与 fragment、**保留 query 原顺序**）+ 会话指纹（合并后的 headers/cookies canonical JSON 再 sha256）+ `render` 标志 + `ua_strategy` + `profile_id@version`（无 profile 时该段为空字符串）
+- 缓存键：规范化 URL（scheme/host 小写、去掉默认端口与 fragment、**保留 query 原顺序**）+ 会话指纹（合并后的 headers/cookies canonical JSON 再 sha256）+ `render` 标志 + `ua_strategy` + `profile_id@version`（无 profile 时该段为空字符串）。自动渲染成功后**写入**的 render 位为 `1`
+- HTTP 代理：只读 `ARACHNE_HTTP_PROXY`（`app/config.py`，空=关）。有值时 httpx 走 proxy transport、**不用** `PinIPAsyncTransport`，`trust_env=false`（忽略 `HTTP_PROXY`/`HTTPS_PROXY`）。请求前仍 `assert_public_http_url` + egress。Playwright `launch(proxy=…)` 使用同一 URL（userinfo 拆成 username/password）。日志与错误 detail 去掉 userinfo。非法 URL → `fetch_failed`。请求体没有 proxy 字段
 - 只缓存成功 `ExtractResponse`，不缓存错误（含 `challenge_detected` / `render_*` / `session_invalid` / `profile_invalid`）
 - 会话：`ARACHNE_SESSIONS_DIR`（默认 `./data/sessions`）、`ARACHNE_SESSION_KEY`
 - 站点规则：`ARACHNE_PROFILES_DIR`（默认 `./data/profiles`，可为空）；热加载 debounce 1s
@@ -591,9 +595,9 @@ profiles/
 
 流程：解析 URL → 可选 egress allowlist → `getaddrinfo` → 若地址为 private / loopback / link-local / unspecified（含 IPv4-mapped IPv6）则 `bad_url`。
 
-**httpx**：自定义 `AsyncBaseTransport` 在现有公网检查之后，按 getaddrinfo 顺序对每个仍通过 `is_blocked_ip` 的 A/AAAA 做 TCP 连接；TLS 的 `server_hostname` / SNI 为**原始 host**；HTTP `Host` 仍为原始 hostname。连接/读超时沿用现有值。每个请求与每次跳转仍走 SSRF hook。
+**httpx**：未设置 `ARACHNE_HTTP_PROXY` 时，自定义 `AsyncBaseTransport` 在现有公网检查之后，按 getaddrinfo 顺序对每个仍通过 `is_blocked_ip` 的 A/AAAA 做 TCP 连接；TLS 的 `server_hostname` / SNI 为**原始 host**；HTTP `Host` 仍为原始 hostname。连接/读超时沿用现有值。每个请求与每次跳转仍走 SSRF hook。设置了代理时改走 httpx proxy transport，不做 pin-IP；hook 与 `fetch_url` 里的公网 / allowlist 检查仍在。
 
-**Playwright（`render=true`）**：只做 `assert_public_http_url` + allowlist，**不**在浏览器里 pin-IP。浏览器仍按 hostname 建连。
+**Playwright（`render=true` 与自动渲染）**：只做 `assert_public_http_url` + allowlist，**不**在浏览器里 pin-IP。浏览器仍按 hostname 建连；`ARACHNE_HTTP_PROXY` 非空时 launch 传入同一代理。
 
 每次跳转前同样做 scheme / 公网 / allowlist 校验（httpx `request` hook）。`render=true` 在启动浏览器前对目标 URL 做同一检查。
 
@@ -601,7 +605,7 @@ profiles/
 
 ### 4.6 可观测性
 
-抽取日志字段：`latency_ms`、`error_code`、`cache`（hit/miss）、`session`（指纹前缀）、`profile`（`id@version` 或 `-`）、`url`、`request_id`。Suggest 另记 `strategy`。Job worker 另记 `job_id` / `total` / 终态。禁止记录 Cookie / Authorization / cookies / 会话明文 / LLM API key / `X-Arachne-Key`。重试只记录 `attempt` / `delay_s` / `error_code`。默认文本 formatter；`ARACHNE_LOG_JSON=1` 时每行一个 JSON 对象。`GET /metrics` 与 `/stats` 双写。
+抽取日志字段：`latency_ms`、`error_code`、`cache`（hit/miss）、`session`（指纹前缀）、`profile`（`id@version` 或 `-`）、`url`、`request_id`、`qps_wait_ms`、`auto_render`（`0` 或 `1`）。Suggest 另记 `strategy`，并带同样的 `qps_wait_ms` / `auto_render`。Job worker 另记 `job_id` / `total` / 终态。禁止记录 Cookie / Authorization / cookies / 会话明文 / LLM API key / `X-Arachne-Key` / 代理 URL 的 userinfo。重试只记录 `attempt` / `delay_s` / `error_code`。代理启用时日志写打码后的 `proxy=`。默认文本 formatter；`ARACHNE_LOG_JSON=1` 时每行一个 JSON 对象。`GET /metrics` 与 `/stats` 双写。
 
 ## 5. 实现分期（开发计划）
 
@@ -688,6 +692,19 @@ profiles/
 - [x] `ARACHNE_JOB_DB_TTL_SECONDS` 默认 604800；`_env_bool` helper
 - [x] **不做**：多副本 / Postgres / Redis、OAuth、应用内 TLS、webhook、key→client 绑定
 
+### P8′ — 傻瓜抽取（0.9.0，已实现）
+
+调用方继续只 POST `/extract`（或 jobs）里的 `url`。复杂度留在服务端。单实例个人使用。
+
+- [x] `ARACHNE_QPS_MODE=queue|reject`，默认 `queue`；等待到 1s 固定窗口有空位，`ARACHNE_QPS_WAIT_SECONDS` 默认 30，超出仍 `rate_limited`。非法 mode → `queue`。`wait<=0` 立即 `rate_limited`。排队只在 `limits.py`，`acquire` 返回 `wait_ms`
+- [x] 每次 `run_extract` / `run_suggest` 只 acquire 一次；自动渲染不占第二个 QPS 名额，且留在同一次 semaphore 内
+- [x] 代理仅 `ARACHNE_HTTP_PROXY`（空=关）。设置后 httpx 用 proxy transport、不用 pin-IP；仍先做公网 + egress 检查。Playwright 用同一代理。日志打码 userinfo。非法 URL → `fetch_failed`
+- [x] `ARACHNE_AUTO_RENDER` 默认 true。仅当请求 `render=false` 且 `challenge_detected` 且 Playwright 可 import。没有 Playwright 则返回原错误，不改成 `render_unavailable`。显式 `render=true` 只走浏览器。成功时缓存 render 位 = 1。suggest 走同一 fetch helper
+- [x] 响应不新增字段。日志 `qps_wait_ms`、`auto_render=0|1`
+- [x] `/stats` 与 Prometheus 双写 `qps_waits`、`qps_wait_ms_sum`（指标侧为秒：`arachne_qps_wait_seconds_sum`）、`auto_renders`
+- [x] Compose profile `playwright` 构建 `Dockerfile.playwright`；默认仍是瘦镜像
+- [x] **不做**：按 host 限速、代理池、对 `unauthorized_upstream` / `extract_empty` 自动渲染、mnemo、profiles/auth/DB schema、把 Chromium 塞进默认镜像、多副本 / Redis
+
 ## 6. 路线图总览
 
 ```mermaid
@@ -701,6 +718,7 @@ flowchart LR
   P3 --> P6[P6 半自动 profiles]
   P5 --> P6
   P6 --> P7[P7a 单实例加固]
+  P7 --> P8[P8′ 傻瓜抽取]
 ```
 
 与用户后续需求的对应关系：
@@ -714,10 +732,12 @@ flowchart LR
 | 批量队列 | P4 | 进程内队列 + 轮询 |
 | 持久化存储 | P5 | SQLite jobs；会话仍为文件 |
 | 内网 sidecar 加固 | P7a | 可选 API key、pin-IP、allowlist、/ready、/metrics；非多副本 |
+| 傻瓜抽取（排队 / 代理 / 自动渲染） | P8′ | 仍是单次 POST `url`；无多副本 |
 | 「认证绕过」 | **不实现攻击型绕过** | 以受控会话 + 明确错误码替代 |
 
 ## 7. 与当前仓库状态
 
+- 0.9.0：QPS `queue`、`ARACHNE_HTTP_PROXY`、`challenge_detected` 自动 Playwright；响应契约不新增字段
 - 0.8.1：`ExtractResponse.images` 从正文区域收集 `<img>`；`metadata.og.image` 独立、不合并
 - P7a 已实现：可选 API key、`/ready`、httpx pin-IP、egress allowlist、JSON 日志、`/metrics`、profiles 写盘闸门
 - P6 仍有效：`POST /profiles/suggest` 与 `POST /profiles`；suggest 不写盘；写入需 `ARACHNE_PROFILES_WRITE=1`
@@ -728,7 +748,7 @@ flowchart LR
 
 ## 8. 验收（P7a）
 
-1. `uvicorn app.main:app` 可在**未安装 Playwright**、**未配置 LLM key**、**REQUIRE_AUTH=false** 时启动；OpenAPI version `0.8.1`  
+1. `uvicorn app.main:app` 可在**未安装 Playwright**、**未配置 LLM key**、**REQUIRE_AUTH=false** 时启动；OpenAPI version `0.9.0`  
 2. `ARACHNE_REQUIRE_AUTH=true` 且 `ARACHNE_API_KEYS` 为空 → lifespan 拒绝启动  
 3. 鉴权开：无 key / 错 key → `unauthorized`（401）；Bearer 或 `X-Arachne-Key` 均可；`/health` 与 `/ready` 免鉴权；`/metrics`、`/stats` 受 `*_PUBLIC` 控制  
 4. `POST /profiles` 在 `ARACHNE_PROFILES_WRITE` 未开时 → `forbidden`（403），即使鉴权关闭  

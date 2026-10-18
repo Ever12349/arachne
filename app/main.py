@@ -1,4 +1,4 @@
-"""Arachne P7: URL → structured JSON extract, with single-instance production hardening."""
+"""Arachne P8: URL → structured JSON extract. QPS queue, env proxy, and auto-render stay server-side."""
 
 from __future__ import annotations
 
@@ -59,7 +59,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with create_http_client() as client:
         app.state.http_client = client
         app.state.extract_cache = ResultCache(maxsize=config.CACHE_MAXSIZE, ttl=config.CACHE_TTL_SECONDS)
-        app.state.rate_limiter = FixedWindowRateLimiter(qps=config.QPS)
+        app.state.rate_limiter = FixedWindowRateLimiter(
+            qps=config.QPS,
+            mode=config.QPS_MODE,
+            wait_seconds=config.QPS_WAIT_SECONDS,
+        )
         app.state.extract_semaphore = extract_semaphore(config.MAX_CONCURRENCY)
         app.state.stats = Stats()
         app.state.profile_registry = ProfileRegistry.from_config()
@@ -87,10 +91,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="arachne",
-    version="0.8.1",
+    version="0.9.0",
     description=(
         "URL → structured JSON extract for AI agents. Single-instance intranet sidecar "
-        "with optional API-key auth, SQLite-backed batch jobs, and profile suggest."
+        "with optional API-key auth, SQLite-backed batch jobs, profile suggest, "
+        "queued QPS, an optional HTTP proxy, and automatic Playwright fallback."
     ),
     lifespan=lifespan,
     dependencies=[Depends(enforce_auth)],

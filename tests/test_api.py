@@ -19,7 +19,7 @@ def test_health(api_client: TestClient):
 
 def test_openapi_version(api_client: TestClient):
     spec = api_client.get("/openapi.json").json()
-    assert spec["info"]["version"] == "0.8.1"
+    assert spec["info"]["version"] == "0.9.0"
 
 
 def test_request_id_generated_and_echoed(api_client: TestClient):
@@ -41,6 +41,9 @@ def test_metrics_lists_expected_series(api_client: TestClient):
         "arachne_cache_hits_total",
         "arachne_cache_misses_total",
         "arachne_request_latency_seconds",
+        "arachne_qps_waits_total",
+        "arachne_qps_wait_seconds_sum",
+        "arachne_auto_renders_total",
     ):
         assert name in body
 
@@ -56,6 +59,9 @@ def test_stats_shape_before_extracts(api_client: TestClient):
     assert data["in_flight"] == 0
     assert data["latency_ms_sum"] == 0 or data["latency_ms_sum"] == 0.0
     assert data["latency_ms_count"] == 0
+    assert data["qps_waits"] == 0
+    assert data["qps_wait_ms_sum"] == 0 or data["qps_wait_ms_sum"] == 0.0
+    assert data["auto_renders"] == 0
 
 
 def test_get_extract_success(api_client: TestClient):
