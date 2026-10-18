@@ -2,7 +2,7 @@
 
 > 版本：v0.10.0 · 受众：维护者与调用方（AI Agent 系统）  
 > 仓库：https://github.com/Ever12349/arachne  
-> 状态：P9′ 已落地（调用方仍只 POST `url`；`challenge_detected` / `unauthorized_upstream` 可各回退一次 Playwright，并把浏览器 Cookie 写成 Fernet `auto-<host>`）。P8′（QPS 排队、`ARACHNE_HTTP_PROXY`、挑战页自动 Playwright）仍有效。单实例 / 内网 sidecar。P7a（可选 API key、`/ready`、httpx pin-IP、egress allowlist、JSON 日志、Prometheus `/metrics`）与 0.8.1 正文区域 `images` 仍有效。P6 半自动 profiles 与 P5 SQLite jobs 仍有效。Worker 仍为进程内 asyncio。**不要**多副本（无 Postgres/Redis）。TLS 终止在反向代理，应用本身只讲 HTTP。默认镜像仍不含浏览器（Compose profile `playwright` 才构建 `Dockerfile.playwright`）。无 OAuth / webhook / 密钥绑定客户端。会话仍为 Fernet 文件。可选 OpenAI 兼容 LLM（`ARACHNE_LLM_*`）仅用于 suggest。复用自动会话需要配置 `ARACHNE_SESSION_KEY`。
+> 状态：P10′ 只补调用方文档契约，**不改行为、不升版本**。P9′ 已落地（调用方仍只 POST `url`；`challenge_detected` / `unauthorized_upstream` 可各回退一次 Playwright，并把浏览器 Cookie 写成 Fernet `auto-<host>`）。P8′（QPS 排队、`ARACHNE_HTTP_PROXY`、挑战页自动 Playwright）仍有效。单实例 / 内网 sidecar。P7a（可选 API key、`/ready`、httpx pin-IP、egress allowlist、JSON 日志、Prometheus `/metrics`）与 0.8.1 正文区域 `images` 仍有效。P6 半自动 profiles 与 P5 SQLite jobs 仍有效。Worker 仍为进程内 asyncio。**不要**多副本（无 Postgres/Redis）。TLS 终止在反向代理，应用本身只讲 HTTP。默认镜像仍不含浏览器（Compose profile `playwright` 才构建 `Dockerfile.playwright`）。无 OAuth / webhook / 密钥绑定客户端。会话仍为 Fernet 文件。可选 OpenAI 兼容 LLM（`ARACHNE_LLM_*`）仅用于 suggest。复用自动会话需要配置 `ARACHNE_SESSION_KEY`。有状态浏览器会话推迟；外部浏览器池不计划。
 
 ## 1. 定位
 
@@ -46,6 +46,29 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 ## 3. API 契约（面向 Agent）
 
 契约版本 **0.10.0**。响应 JSON 不新增字段。
+
+### 3.0 调用方契约（P10′，仅文档）
+
+arachne 是给 AI Agent 用的 **URL → 结构化页** 服务。主入口仍是 `POST /extract`。没有 `/browse`。`POST /jobs` 的每条 item 复用同一条 fetch（httpx，软墙时至多一次 Playwright）。
+
+**访问策略**（`render` 省略或 `false`）：
+
+1. 先 httpx。成功即返回。
+2. 该次错误码属于 `ARACHNE_AUTO_RENDER_ON`，且 `ARACHNE_AUTO_RENDER` 开、本机可 import Playwright → **最多一次** Playwright。仍在同一次 QPS acquire 与抽取 semaphore 内。
+3. 显式 `render: true` 跳过 httpx，只走浏览器。未安装 Playwright → `render_unavailable`。
+
+| 变量 | 默认 | 调用方需要知道的 |
+|------|------|------------------|
+| `ARACHNE_AUTO_RENDER` | `true` | 软墙自动渲染总开关。关掉只禁回退；显式 `render: true` 仍可用浏览器 |
+| `ARACHNE_AUTO_RENDER_ON` | `challenge,unauthorized` | `challenge` → `challenge_detected`；`unauthorized` → `unauthorized_upstream`。显式空字符串 = 没有码。未知 token 忽略 |
+| `ARACHNE_SESSION_PERSIST` | `true` | 浏览器页被接受且 Cookie 非空时，写入 Fernet `auto-<host>`。`false` 只关写入 |
+| `ARACHNE_SESSION_KEY` | 空 | 加载 `session_id` 与复用 `auto-<host>` 都需要合法 Fernet 密钥。服务不生成密钥 |
+| `ARACHNE_HTTP_PROXY` | 空 | 可选 HTTP(S) 代理，httpx 与 Playwright 共用。空 = 关。请求体没有 proxy 字段 |
+| `ARACHNE_QPS` / `ARACHNE_QPS_MODE` / `ARACHNE_QPS_WAIT_SECONDS` | `5` / `queue` / `30` | 全局抽取限速。`queue` 等到下一窗口；`reject` 立即 `rate_limited` |
+
+验证码页和登录墙仍要人来处理。服务不解验证码、不代登录、不做挑战绕过工具。软墙回退是多一次抓取，不保证任一站点成功。
+
+**未做（记录在案，不是 0.10.0 行为）**：有状态浏览器会话（多步操作、把活浏览器交给人）推迟，不新增 API。外部浏览器池不计划。
 
 ### 3.1 端点（P7）
 
@@ -733,6 +756,16 @@ profiles/
 - [x] 成功非空写入覆盖文件。失败不动旧文件。`write_session_file` 同目录临时文件 + `os.replace`
 - [x] **不做**：新浏览器引擎、WebFetch、代理池、指纹、jobs schema、新响应字段、新 Prometheus 计数
 
+### P10′ — 调用方文档契约（0.10.0，仅文档）
+
+行为与 P9′ 相同。不升到 0.11，不新增端点或响应字段。
+
+- [x] README、DESIGN §3.0、OpenAPI 短说明：主入口 `POST /extract`；httpx → `ARACHNE_AUTO_RENDER_ON` 软墙码 → 至多一次 Playwright；`render: true` 跳过 httpx
+- [x] 写明 `ARACHNE_AUTO_RENDER`、`ARACHNE_AUTO_RENDER_ON`、`ARACHNE_SESSION_PERSIST`、`ARACHNE_SESSION_KEY`，以及已有的代理 / QPS 开关
+- [x] 验证码与登录墙仍需人；无绕过工具
+- [x] 有状态浏览器会话（多步 / 人工交接）推迟；外部浏览器池不计划
+- [x] **不做**：新 `/browse`、扩大自动渲染触发集合、新响应字段、验证码破解
+
 ## 6. 路线图总览
 
 ```mermaid
@@ -748,6 +781,7 @@ flowchart LR
   P6 --> P7[P7a 单实例加固]
   P7 --> P8[P8′ 傻瓜抽取]
   P8 --> P9[P9′ 自动会话]
+  P9 --> P10[P10′ 调用方文档]
 ```
 
 与用户后续需求的对应关系：
@@ -763,11 +797,14 @@ flowchart LR
 | 内网 sidecar 加固 | P7a | 可选 API key、pin-IP、allowlist、/ready、/metrics；非多副本 |
 | 傻瓜抽取（排队 / 代理 / 自动渲染） | P8′ | 仍是单次 POST `url`；无多副本 |
 | 软墙后再试一次浏览器并记住 Cookie | P9′ | 仍是单次 POST `url`；不解验证码；复用要 `SESSION_KEY` |
+| 调用方怎么选入口与访问策略 | P10′ | 仅文档。主入口 `POST /extract`；无 `/browse` |
+| 有状态浏览器会话（多步 / 人工交接） | 推迟 | 设计记录。不新增 API，不在 0.10.0 实现 |
+| 外部浏览器池 | 不计划 | 不做 |
 | 「认证绕过」 | **不实现攻击型绕过** | 以受控会话 + 明确错误码替代 |
 
 ## 7. 与当前仓库状态
 
-- 0.10.0：`ARACHNE_AUTO_RENDER_ON`（含 `unauthorized_upstream`）、Fernet `auto-<host>` 读写；响应契约不新增字段；复用需要 `ARACHNE_SESSION_KEY`
+- 0.10.0：`ARACHNE_AUTO_RENDER_ON`（含 `unauthorized_upstream`）、Fernet `auto-<host>` 读写；响应契约不新增字段；复用需要 `ARACHNE_SESSION_KEY`。P10′ 把同一行为写成调用方契约（§3.0）：无 `/browse`，验证码/登录墙要人，有状态浏览器会话推迟，外部浏览器池不计划
 - 0.9.0：QPS `queue`、`ARACHNE_HTTP_PROXY`、`challenge_detected` 自动 Playwright；响应契约不新增字段
 - 0.8.1：`ExtractResponse.images` 从正文区域收集 `<img>`；`metadata.og.image` 独立、不合并
 - P7a 已实现：可选 API key、`/ready`、httpx pin-IP、egress allowlist、JSON 日志、`/metrics`、profiles 写盘闸门

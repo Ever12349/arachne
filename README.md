@@ -8,6 +8,29 @@ This is a **trusted single-instance / intranet sidecar**. Do not run multiple re
 
 API contract version **0.10.0**.
 
+## Caller contract
+
+Arachne is an AI-agent service: one URL in, one structured page out (`title`, `main_text`, metadata, links, content-area `images`). The primary call stays `POST /extract`. There is no `/browse` API. `POST /jobs` runs the same fetch once per item.
+
+Access when `render` is omitted or `false`:
+
+1. httpx fetches the page. A successful fetch returns immediately.
+2. If that attempt's error code is in `ARACHNE_AUTO_RENDER_ON`, auto-render is on, and Playwright imports, the server tries Playwright **once** (same QPS slot, same concurrency slot).
+3. `render: true` skips httpx and uses Playwright only.
+
+| Knob | Default | What the caller should assume |
+|------|---------|-------------------------------|
+| `ARACHNE_AUTO_RENDER` | `true` | Master switch for that one Playwright retry |
+| `ARACHNE_AUTO_RENDER_ON` | `challenge,unauthorized` | `challenge` → `challenge_detected`; `unauthorized` → `unauthorized_upstream`. Explicit empty selects no codes. Unknown tokens are ignored |
+| `ARACHNE_SESSION_PERSIST` | `true` | After an accepted browser page, non-empty cookies may be written to Fernet `auto-<host>`. `false` disables writes only |
+| `ARACHNE_SESSION_KEY` | empty | Required to load `session_id` and to reuse `auto-<host>`. The server does not generate a key |
+| `ARACHNE_HTTP_PROXY` | empty | Optional http(s) proxy for httpx and Playwright. Empty is off |
+| `ARACHNE_QPS` / `ARACHNE_QPS_MODE` / `ARACHNE_QPS_WAIT_SECONDS` | `5` / `queue` / `30` | Global extract rate limit. `queue` waits; `reject` returns `rate_limited` immediately |
+
+CAPTCHA pages and login walls still need a human. Arachne does not solve captchas, log in, or ship challenge-bypass tooling. A soft-wall retry is one extra fetch, not a guarantee that a site will succeed.
+
+Stateful browser sessions (multi-step navigation, handing a live browser to a person) are deferred. An external browser pool is not planned.
+
 ## Install
 
 ```bash

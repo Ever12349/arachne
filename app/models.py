@@ -33,7 +33,10 @@ class ExtractRequest(BaseModel):
     )
     render: bool = Field(
         default=False,
-        description="If true, fetch via headless Playwright (POST only; optional extra install)",
+        description=(
+            "POST only. true: Playwright only (skips httpx). "
+            "false: httpx first, then at most one Playwright retry on ARACHNE_AUTO_RENDER_ON"
+        ),
     )
     site_profile: str | None = Field(
         default=None,
