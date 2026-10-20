@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
-from urllib.parse import urlparse, urlsplit, urlunsplit
+from urllib.parse import urlparse
 
 from app.errors import bad_url, fetch_failed
 
@@ -42,20 +42,6 @@ def is_blocked_ip(raw: str) -> bool:
     if ip.version == 6 and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
     return bool(ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified)
-
-
-def redact_url_userinfo(url: str) -> str:
-    """Drop `user:pass@` so admin GETs and capture commands do not echo it."""
-    parts = urlsplit((url or "").strip())
-    if parts.username is None and parts.password is None:
-        return (url or "").strip()
-    hostname = parts.hostname or ""
-    if ":" in hostname:
-        hostname = f"[{hostname}]"
-    netloc = hostname
-    if parts.port is not None:
-        netloc = f"{netloc}:{parts.port}"
-    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
 def parse_http_url(url: str) -> tuple[str, str, int]:
