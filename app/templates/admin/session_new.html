@@ -1,0 +1,79 @@
+{% extends "admin/base.html" %}
+{% block title %}新建会话 · arachne admin{% endblock %}
+{% block body %}
+<h1>新建会话</h1>
+{% if url %}
+<p class="note">目标已填好。在<strong>宿主机</strong>上运行下面的命令（不要在容器里开有头浏览器）。通过墙之后在终端按 Enter，页面会看到 <code>auto-&lt;host&gt;.bin</code> 出现，再重试抽取。</p>
+{% else %}
+<p class="note">通常从仪表盘或最近失败里点开 URL。只有没有失败记录时，才在这里粘贴地址。</p>
+{% endif %}
+
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+{% if saved_id %}<p class="ok">已写入 <code>{{ saved_id }}.bin</code>。响应里没有 Cookie 明文。</p>{% endif %}
+
+<form method="get" action="/admin/sessions/new">
+  <label for="url">URL</label>
+  <input id="url" name="url" type="text" value="{{ url }}" autocomplete="off" placeholder="https://example.com/article">
+  <p><button type="submit">生成采集命令</button></p>
+</form>
+
+{% if status %}
+<h2>宿主机采集命令</h2>
+{% if not status.session_key_configured %}
+<p class="error">当前进程没有可用的 <code>ARACHNE_SESSION_KEY</code>。先在运行命令的环境里导出密钥。页面不会显示密钥本身。</p>
+{% endif %}
+<p class="note">会话 id <code>{{ status.session_id }}</code> · 文件 <code>{{ status.filename }}</code>{% if status.ready %} · 已出现 {{ status.mtime }}{% else %} · 尚未出现{% endif %}</p>
+<pre class="cmd" id="capture-command">{{ status.command }}</pre>
+<p class="actions">
+  <button type="button" id="copy-cmd" class="ghost">复制命令</button>
+  {% if external_href %}
+  <a class="ghost btn" href="{{ external_href }}" target="_blank" rel="noopener noreferrer">打开原页</a>
+  {% endif %}
+</p>
+<form id="retry-form" method="post" action="/admin/extract" {% if not status.ready %}hidden{% endif %}>
+  <input type="hidden" name="url" value="{{ status.url }}">
+  <input type="hidden" name="session_id" value="{{ status.session_id }}">
+  <button type="submit">重试抽取</button>
+</form>
+{% endif %}
+
+<details {% if not url %}open{% endif %}>
+  <summary>手动粘贴 Cookie（没有失败记录时的后备）</summary>
+  <p class="note">扁平 JSON，形如 <code>{"sid":"abc"}</code>。写入和 <code>scripts/write_session.py</code> 相同的 Fernet 文件，默认 id 为 <code>auto-&lt;host&gt;</code>。</p>
+  <form method="post" action="/admin/sessions">
+    <label for="paste-url">URL</label>
+    <input id="paste-url" name="url" type="text" value="{{ url }}" autocomplete="off">
+    <label for="cookies-json">Cookie JSON</label>
+    <textarea id="cookies-json" name="cookies_json" placeholder='{"sid":"abc"}'></textarea>
+    <p><button type="submit">写入会话</button></p>
+  </form>
+</details>
+
+{% if status %}
+<script>
+(function () {
+  var pageUrl = {{ status.url | tojson }};
+  var ready = document.getElementById("retry-form");
+  var command = document.getElementById("capture-command");
+  var copy = document.getElementById("copy-cmd");
+  if (copy && command) {
+    copy.addEventListener("click", function () {
+      var text = command.textContent || "";
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(text);
+      }
+    });
+  }
+  async function poll() {
+    var response = await fetch("/admin/api/capture?url=" + encodeURIComponent(pageUrl));
+    if (!response.ok) return;
+    var data = await response.json();
+    if (command && data.command) command.textContent = data.command;
+    if (data.ready && ready) ready.hidden = false;
+  }
+  poll();
+  setInterval(poll, 2000);
+})();
+</script>
+{% endif %}
+{% endblock %}

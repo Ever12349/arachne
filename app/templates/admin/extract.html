@@ -1,0 +1,34 @@
+{% extends "admin/base.html" %}
+{% block title %}试抽取 · arachne admin{% endblock %}
+{% block body %}
+<h1>试抽取</h1>
+<p class="note">走同一条 <code>POST /extract</code> 管道。可选填会话 id；留空时会尝试 <code>auto-&lt;host&gt;</code>。</p>
+<form method="post" action="/admin/extract">
+  <label for="url">URL</label>
+  <input id="url" name="url" type="text" value="{{ url }}" required autocomplete="off">
+  <label for="session_id">session_id（可选）</label>
+  <input id="session_id" name="session_id" type="text" value="{{ session_id }}" autocomplete="off">
+  <p><button type="submit">抽取</button></p>
+</form>
+
+{% if result %}
+<h2>结果</h2>
+<p class="ok">HTTP {{ result.status_code }} · {{ result.final_url }}</p>
+<p><strong>{{ result.title }}</strong></p>
+<pre class="cmd">{{ result.summary }}{% if result.summary_clipped %}
+
+…{% endif %}</pre>
+{% endif %}
+
+{% if error %}
+<h2>错误</h2>
+<div class="error">
+  <p><code>{{ error.code }}</code> {{ error.message }}</p>
+  {% if error.detail.host %}<p>host {{ error.detail.host }} · {{ error.detail.auto_session_id }}</p>{% endif %}
+  {% if error.detail.admin_hint %}<p>{{ error.detail.admin_hint }}</p>{% endif %}
+</div>
+{% if error.detail.needs_session and new_href %}
+<p class="actions"><a class="btn" href="{{ new_href }}">为此建会话</a></p>
+{% endif %}
+{% endif %}
+{% endblock %}

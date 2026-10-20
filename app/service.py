@@ -22,6 +22,7 @@ from app.errors import (
     unsupported_content,
 )
 from app.extract import apply_max_chars
+from app.failures import note_soft_wall
 from app.fetch import FetchedPage, is_html_content_type
 from app.headers_policy import filter_request_headers
 from app.limits import FixedWindowRateLimiter, Stats
@@ -311,6 +312,7 @@ async def run_extract(
         return apply_max_chars(result, max_chars)
     except ArachneError as exc:
         error_code = exc.code
+        note_soft_wall(exc, requested)
         stats.record_error(exc.code)
         raise
     except Exception:
@@ -401,6 +403,7 @@ async def run_suggest(
         return result
     except ArachneError as exc:
         error_code = exc.code
+        note_soft_wall(exc, requested)
         stats.record_error(exc.code)
         raise
     except Exception:

@@ -9,7 +9,7 @@ from app import config
 from app.errors import ArachneError, render_failed, render_unavailable
 from app.fetch import FetchedPage
 from app.proxy_util import playwright_proxy
-from app.ssrf import assert_public_http_url
+from app.ssrf import assert_public_http_url, normalize_host
 
 logger = logging.getLogger("arachne")
 
@@ -35,6 +35,43 @@ def flatten_playwright_cookies(raw: object) -> dict[str, str]:
         if isinstance(name, str) and isinstance(value, str):
             out[name] = value
     return out
+
+
+def _domain_covers_host(domain: str, host: str) -> bool:
+    domain_l = domain.strip().lstrip(".").lower().rstrip(".")
+    host_l = host.strip().lower().rstrip(".")
+    if not domain_l or not host_l:
+        return False
+    norm_domain = normalize_host(domain_l)
+    norm_host = normalize_host(host_l)
+    return (
+        host_l == domain_l
+        or host_l.endswith("." + domain_l)
+        or norm_host == norm_domain
+        or bool(norm_domain) and norm_host.endswith("." + norm_domain)
+    )
+
+
+def cookies_for_host(raw: object, host: str) -> dict[str, str]:
+    """Cookies whose domain covers `host`, flattened name → value.
+
+    A missing domain is treated as host-only for this navigation. Used by the
+    host capture script. In-container auto-persist still uses the unfiltered
+    `flatten_playwright_cookies`.
+    """
+    if not isinstance(raw, list):
+        return {}
+    matched: list[dict[str, object]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        domain = item.get("domain")
+        if not isinstance(domain, str) or not domain.strip():
+            matched.append(item)
+            continue
+        if _domain_covers_host(domain, host):
+            matched.append(item)
+    return flatten_playwright_cookies(matched)
 
 
 def playwright_available() -> bool:

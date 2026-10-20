@@ -123,6 +123,17 @@ def _p7_safe_defaults(tmp_path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("app.config.SESSION_KEY", "")
     monkeypatch.setattr("app.config.SESSIONS_DIR", str(tmp_path / "sessions"))
     monkeypatch.setattr("app.config.HTTP_PROXY", "")
+    monkeypatch.setattr("app.config.ADMIN_ENABLED", True)
+
+
+@pytest.fixture(autouse=True)
+def _clear_failure_ring():
+    """Soft-wall failures are process-global; keep tests from seeing each other."""
+    from app.failures import get_failure_ring
+
+    get_failure_ring().clear()
+    yield
+    get_failure_ring().clear()
 
 
 @pytest.fixture(autouse=True)

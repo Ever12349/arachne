@@ -50,8 +50,8 @@ def create_http_client() -> httpx.AsyncClient:
     """Shared client. Pin-IP when no proxy; httpx proxy transport when ARACHNE_HTTP_PROXY is set.
 
     `trust_env` is off so HTTP_PROXY / HTTPS_PROXY / ALL_PROXY do not apply.
-    The request hook still runs assert_public_http_url (scheme, egress, public IP)
-    before the proxy or the pinned connection is used.
+    The request hook still runs assert_public_http_url (scheme, egress, at least
+    one public IP) before the proxy or the pinned connection is used.
     """
     proxy = configured_proxy_url()
     if proxy is None:
