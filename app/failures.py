@@ -19,8 +19,8 @@ from app.ssrf import normalize_host, redact_url_userinfo
 SOFT_WALL_CODES = frozenset({"challenge_detected", "unauthorized_upstream"})
 
 ADMIN_HINT = (
-    "On localhost open /admin, click this failed URL, run the shown capture command, "
-    "then retry extract. The API does not return cookie plaintext."
+    "On localhost open /admin, click 开始 to open a headed browser on this computer, "
+    "pass the wall, then click 完成. The API does not return cookie plaintext."
 )
 
 

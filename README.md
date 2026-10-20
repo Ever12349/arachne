@@ -6,7 +6,7 @@ The service fetches HTML with `httpx` (optional headless Playwright) and extract
 
 This is a **trusted single-instance / intranet sidecar**. Do not run multiple replicas (SQLite + in-process worker). Terminate TLS at a reverse proxy; the app speaks HTTP. Optional shared API keys are not OAuth and are not bound to a client.
 
-API contract version **0.11.0**.
+API contract version **0.12.0**.
 
 ## Caller contract
 
@@ -101,6 +101,10 @@ export ARACHNE_EGRESS_ALLOWLIST=""       # comma-separated domain suffixes; empt
 export ARACHNE_LOG_JSON=false            # 1/true/yes → one JSON object per log line
 export ARACHNE_ADMIN_ENABLED=true        # localhost /admin for humans; false returns 404
 export ARACHNE_ADMIN_TRUST_DOCKER=false  # true: allow /admin from the Docker bridge when Host is 127.0.0.1 or localhost
+export ARACHNE_HOST_HELPER_TOKEN=""      # shared secret for the Mac helper; install_host_helper.py writes it
+export ARACHNE_HOST_HELPER_PORT=18765    # helper listens on 127.0.0.1 only
+export ARACHNE_IN_DOCKER=false           # true inside Compose; never open a headed browser in the container
+export ARACHNE_CAPTURE_MODE=auto         # auto | host | helper. host spawns only when not in Docker
 uvicorn app.main:app
 ```
 
@@ -225,7 +229,7 @@ docker run --rm -p 8000:8000 \
 
 ## Encrypted sessions
 
-Agents still have no session API on `POST /extract`. Humans on localhost can use [/admin](ADMIN.md) to capture or paste a session. That UI never returns cookie plaintext. Write files from the shell with `scripts/write_session.py`, or with `scripts/capture_session.py` after a person passes a wall in a headed browser on the host.
+Agents still have no session API on `POST /extract`. Humans on localhost can use [/admin](ADMIN.md): **开始** opens a headed browser on the Mac (via a one-time loopback helper), and **完成** writes the Fernet file. That UI never returns cookie plaintext. `scripts/write_session.py` still pastes cookies by hand. `scripts/capture_session.py` remains a manual fallback when the helper is not installed.
 
 Generate a Fernet key (url-safe base64) and keep it only in `ARACHNE_SESSION_KEY`:
 
@@ -555,7 +559,7 @@ Upstream 401/403 become `unauthorized_upstream` unless the body looks like a cha
 
 `/admin` is a localhost Jinja page for a person, not an agent endpoint (it is omitted from OpenAPI). Same API keys as `/extract`. `ARACHNE_ADMIN_ENABLED=false` hides it. Personal Compose sets `ARACHNE_ADMIN_TRUST_DOCKER=true` so a published port can open `/admin` when the browser Host is `127.0.0.1` or `localhost`. See [ADMIN.md](ADMIN.md).
 
-Click a failed URL on the dashboard → the new-session page shows `python scripts/capture_session.py --url '…'` → run that on the host (headed browser) → the page sees `./data/sessions/auto-<host>.bin` → retry extract. Paste flat cookie JSON only when there is no failure row. Details: [ADMIN.md](ADMIN.md).
+One-time on the Mac: `python scripts/install_host_helper.py` (LaunchAgent on `127.0.0.1:18765`, shared token in `.env`). Click a failed URL → **开始** opens a headed browser on the host → pass the wall → **完成** (or the helper notices the challenge page cleared) → the page sees `./data/sessions/auto-<host>.bin` → retry extract. The container does not show the Mac UI. Paste flat cookie JSON only when there is no failure row. Details: [ADMIN.md](ADMIN.md).
 
 ## Tests
 
@@ -578,7 +582,7 @@ How the new P2/P3 codes are verified without a real site or browser:
 | `llm_failed` | Mock LLM selectors that fail lxml self-test with `"strategy":"llm"` (`tests/test_profiles_suggest.py`) |
 | `job_not_found` | `GET` or cancel an unknown / expired job id (`tests/test_jobs.py`) |
 
-`tests/test_extract.py` covers content-area `images` (relative→absolute, tracker skip, dedupe/cap, empty list, `og.image` not merged). `tests/test_jobs.py` covers create / poll / cancel / per-item errors / QPS. `tests/test_jobs_persistence.py` covers SQLite reopen, URL search, delete, `X-Arachne-Client` isolation, and TTL cleanup. `tests/test_profiles_suggest.py` covers heuristic suggest, `llm_unavailable`, mocked LLM verify/fail, auto fallback, and that suggest does not write disk. `tests/test_profiles_write.py` covers 409 / overwrite / hot-reload after write and the `ARACHNE_PROFILES_WRITE` gate. `tests/test_auth.py`, `tests/test_ready.py`, `tests/test_egress.py`, and `tests/test_transport.py` cover P7a auth, readiness, allowlist, and pin-IP. `tests/test_ssrf.py` covers mixed private+public DNS (allowed) and an all-private answer (`bad_url`). `tests/test_admin.py` covers the localhost gate, session list/delete without secrets, soft-wall `needs_session` detail, and capture polling. `tests/test_qps_queue.py`, `tests/test_auto_render.py`, `tests/test_auto_session.py`, and `tests/test_proxy_client.py` cover queue / reject, auto-render (including `unauthorized_upstream`), Fernet `auto-<host>` reuse, and the proxy client branch (no live network).
+`tests/test_extract.py` covers content-area `images` (relative→absolute, tracker skip, dedupe/cap, empty list, `og.image` not merged). `tests/test_jobs.py` covers create / poll / cancel / per-item errors / QPS. `tests/test_jobs_persistence.py` covers SQLite reopen, URL search, delete, `X-Arachne-Client` isolation, and TTL cleanup. `tests/test_profiles_suggest.py` covers heuristic suggest, `llm_unavailable`, mocked LLM verify/fail, auto fallback, and that suggest does not write disk. `tests/test_profiles_write.py` covers 409 / overwrite / hot-reload after write and the `ARACHNE_PROFILES_WRITE` gate. `tests/test_auth.py`, `tests/test_ready.py`, `tests/test_egress.py`, and `tests/test_transport.py` cover P7a auth, readiness, allowlist, and pin-IP. `tests/test_ssrf.py` covers mixed private+public DNS (allowed) and an all-private answer (`bad_url`). `tests/test_admin.py` covers the localhost gate, session list/delete without secrets, soft-wall `needs_session` detail, capture polling, and one-click start/done. `tests/test_host_helper.py` covers helper auth (loopback and token), capture job status, and the one-time installer. `tests/test_qps_queue.py`, `tests/test_auto_render.py`, `tests/test_auto_session.py`, and `tests/test_proxy_client.py` cover queue / reject, auto-render (including `unauthorized_upstream`), Fernet `auto-<host>` reuse, and the proxy client branch (no live network).
 
 `tests/test_jobs.py` covers create 202, per-item failure still `completed`, cancel, `job_not_found`, max URLs, and that creating a job does not burn QPS.
 

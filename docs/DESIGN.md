@@ -1,8 +1,8 @@
 # arachne 设计文档
 
-> 版本：v0.11.0 · 受众：维护者与调用方（AI Agent 系统）  
+> 版本：v0.12.0 · 受众：维护者与调用方（AI Agent 系统）  
 > 仓库：https://github.com/Ever12349/arachne  
-> 状态：0.11.0 增加本机 `/admin`（人用，不是 Agent 契约）以及软墙 `detail` 的 `needs_session`。P10′ 的调用方契约仍然有效：主入口是 `POST /extract`，没有 `/browse`。P9′ 已落地（调用方仍只 POST `url`；`challenge_detected` / `unauthorized_upstream` 可各回退一次 Playwright，并把浏览器 Cookie 写成 Fernet `auto-<host>`）。P8′（QPS 排队、`ARACHNE_HTTP_PROXY`、挑战页自动 Playwright）仍有效。单实例 / 内网 sidecar。P7a（可选 API key、`/ready`、httpx pin-IP、egress allowlist、JSON 日志、Prometheus `/metrics`）与 0.8.1 正文区域 `images` 仍有效。P6 半自动 profiles 与 P5 SQLite jobs 仍有效。Worker 仍为进程内 asyncio。**不要**多副本（无 Postgres/Redis）。TLS 终止在反向代理，应用本身只讲 HTTP。默认镜像仍不含浏览器（Compose profile `playwright` 才构建 `Dockerfile.playwright`）。无 OAuth / webhook / 密钥绑定客户端。会话仍为 Fernet 文件。可选 OpenAI 兼容 LLM（`ARACHNE_LLM_*`）仅用于 suggest。复用自动会话需要配置 `ARACHNE_SESSION_KEY`。有状态浏览器会话推迟；外部浏览器池不计划。
+> 状态：0.12.0 的「开始」由只监听 `127.0.0.1` 的宿主机助手打开有头浏览器，不再把复制命令当主路径。0.11.0 增加本机 `/admin`（人用，不是 Agent 契约）以及软墙 `detail` 的 `needs_session`。P10′ 的调用方契约仍然有效：主入口是 `POST /extract`，没有 `/browse`。P9′ 已落地（调用方仍只 POST `url`；`challenge_detected` / `unauthorized_upstream` 可各回退一次 Playwright，并把浏览器 Cookie 写成 Fernet `auto-<host>`）。P8′（QPS 排队、`ARACHNE_HTTP_PROXY`、挑战页自动 Playwright）仍有效。单实例 / 内网 sidecar。P7a（可选 API key、`/ready`、httpx pin-IP、egress allowlist、JSON 日志、Prometheus `/metrics`）与 0.8.1 正文区域 `images` 仍有效。P6 半自动 profiles 与 P5 SQLite jobs 仍有效。Worker 仍为进程内 asyncio。**不要**多副本（无 Postgres/Redis）。TLS 终止在反向代理，应用本身只讲 HTTP。默认镜像仍不含浏览器（Compose profile `playwright` 才构建 `Dockerfile.playwright`）。无 OAuth / webhook / 密钥绑定客户端。会话仍为 Fernet 文件。可选 OpenAI 兼容 LLM（`ARACHNE_LLM_*`）仅用于 suggest。复用自动会话需要配置 `ARACHNE_SESSION_KEY`。有状态浏览器会话推迟；外部浏览器池不计划。
 
 ## 1. 定位
 
@@ -45,7 +45,7 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 
 ## 3. API 契约（面向 Agent）
 
-契约版本 **0.11.0**。成功响应不新增字段。软墙错误 `detail` 增加 `needs_session`、`host`、`auto_session_id`、`admin_hint`。`/admin` 给人用，不在 OpenAPI 里，不是 Agent 必选接口。操作说明见仓库 `ADMIN.md`。
+契约版本 **0.12.0**。成功响应不新增字段。软墙错误 `detail` 仍是 `needs_session`、`host`、`auto_session_id`、`admin_hint`。`/admin` 给人用，不在 OpenAPI 里，不是 Agent 必选接口。0.12.0 只改人用的采集方式。操作说明见仓库 `ADMIN.md`。
 
 ### 3.0 调用方契约（P10′，仅文档）
 
@@ -779,6 +779,19 @@ Agent 仍只 `POST /extract`。同一进程挂 `/admin`（Jinja2）。`/admin/ap
 - [x] `assert_public_http_url` 与 pin-IP 对齐：只在没有公网地址时 `bad_url`
 - [x] **不做**：验证码破解、容器内有头浏览器 / VNC、持久 Playwright context、Cookie 明文导出
 
+### P12 — 真一键采集（0.12.0）
+
+Agent 契约不变。容器仍然不能显示 Mac 窗口。
+
+- [x] `scripts/arachne-host-helper` 只绑定 `127.0.0.1`（默认端口 18765）。其它地址拒绝启动
+- [x] `ARACHNE_HOST_HELPER_TOKEN`。非 loopback 403；无令牌或错令牌 401。`/health` 仅 loopback
+- [x] `POST /capture`、`GET /capture/{id}`、`POST /capture/{id}/done`。状态不含 Cookie
+- [x] 管理页「开始 / 完成」。文件轮询后「重试抽取」。Cookie 粘贴仍是后备
+- [x] 容器内 `ARACHNE_IN_DOCKER=true` 不在容器里开浏览器。浏览器在宿主机上调用助手
+- [x] 一次性安装：`python scripts/install_host_helper.py`（macOS LaunchAgent）
+- [x] 挑战页标记消失且已有该主机 Cookie 时助手自己保存。不解验证码
+- [x] **不做**：验证码破解、把助手绑到 `0.0.0.0`、Cookie 明文导出
+
 ## 6. 路线图总览
 
 ```mermaid
@@ -796,6 +809,7 @@ flowchart LR
   P8 --> P9[P9′ 自动会话]
   P9 --> P10[P10′ 调用方文档]
   P10 --> P11[P11 本机后台]
+  P11 --> P12[P12 真一键采集]
 ```
 
 与用户后续需求的对应关系：
@@ -812,13 +826,14 @@ flowchart LR
 | 傻瓜抽取（排队 / 代理 / 自动渲染） | P8′ | 仍是单次 POST `url`；无多副本 |
 | 软墙后再试一次浏览器并记住 Cookie | P9′ | 仍是单次 POST `url`；不解验证码；复用要 `SESSION_KEY` |
 | 调用方怎么选入口与访问策略 | P10′ | 仅文档。主入口 `POST /extract`；无 `/browse` |
-| 人在本机过墙并重试 | P11 | `/admin` + 宿主机 `capture_session.py`。不是 Agent API |
+| 人在本机过墙并重试 | P12 | `/admin` 点「开始」；宿主机助手开有头浏览器。不是 Agent API |
 | 有状态浏览器会话（多步 / 人工交接） | 推迟 | 设计记录。不新增 API，不在 0.10.0 实现 |
 | 外部浏览器池 | 不计划 | 不做 |
 | 「认证绕过」 | **不实现攻击型绕过** | 以受控会话 + 明确错误码替代 |
 
 ## 7. 与当前仓库状态
 
+- 0.12.0：真一键采集。宿主机助手只听 `127.0.0.1`，「开始」打开有头浏览器，「完成」或挑战页消失后写入 `auto-<host>.bin`。成功响应不新增字段。OpenAPI 不含 `/admin`
 - 0.11.0：本机 `/admin`（默认开，`ARACHNE_ADMIN_ENABLED` 可关）、软墙 `detail.needs_session` 等四字段、宿主机 `scripts/capture_session.py`、失败环 50 条。成功响应不新增字段。OpenAPI 不含 `/admin`。`assert_public_http_url` 仅在没有公网 IP 时 `bad_url`
 - 0.10.0：`ARACHNE_AUTO_RENDER_ON`（含 `unauthorized_upstream`）、Fernet `auto-<host>` 读写；成功响应不新增字段；复用需要 `ARACHNE_SESSION_KEY`。P10′ 把同一行为写成调用方契约（§3.0）：无 `/browse`，验证码/登录墙要人，有状态浏览器会话推迟，外部浏览器池不计划
 - 0.9.0：QPS `queue`、`ARACHNE_HTTP_PROXY`、`challenge_detected` 自动 Playwright；响应契约不新增字段
@@ -832,7 +847,7 @@ flowchart LR
 
 ## 8. 验收（P7a）
 
-1. `uvicorn app.main:app` 可在**未安装 Playwright**、**未配置 LLM key**、**REQUIRE_AUTH=false** 时启动；OpenAPI version `0.11.0`  
+1. `uvicorn app.main:app` 可在**未安装 Playwright**、**未配置 LLM key**、**REQUIRE_AUTH=false** 时启动；OpenAPI version `0.12.0`  
 2. `ARACHNE_REQUIRE_AUTH=true` 且 `ARACHNE_API_KEYS` 为空 → lifespan 拒绝启动  
 3. 鉴权开：无 key / 错 key → `unauthorized`（401）；Bearer 或 `X-Arachne-Key` 均可；`/health` 与 `/ready` 免鉴权；`/metrics`、`/stats` 受 `*_PUBLIC` 控制  
 4. `POST /profiles` 在 `ARACHNE_PROFILES_WRITE` 未开时 → `forbidden`（403），即使鉴权关闭  

@@ -7,11 +7,12 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, Form, Request
-from fastapi.responses import RedirectResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import text
 
 from app import config
+from app.admin.capture_launch import LaunchResult, capture_job, finish_capture, start_capture
 from app.admin.guard import require_admin
 from app.admin.ops import (
     capture_status,
@@ -291,6 +292,39 @@ async def api_paste_session(request: Request) -> dict[str, str]:
 @router.get("/api/capture")
 async def api_capture(url: str) -> dict[str, object]:
     return capture_status(url)
+
+
+@router.post("/api/capture/start")
+async def api_capture_start(request: Request) -> JSONResponse:
+    body = await _json_object(request)
+    url = body.get("url")
+    if not isinstance(url, str):
+        raise bad_url("url is required")
+    return _launch(start_capture(url))
+
+
+@router.get("/api/capture/jobs/{job_id}")
+async def api_capture_job(job_id: str) -> JSONResponse:
+    return _launch(capture_job(job_id))
+
+
+@router.post("/api/capture/jobs/{job_id}/done")
+async def api_capture_done(job_id: str) -> JSONResponse:
+    return _launch(finish_capture(job_id))
+
+
+def _launch(result: LaunchResult) -> JSONResponse:
+    return JSONResponse(status_code=result.status_code, content=result.body)
+
+
+async def _json_object(request: Request) -> dict[str, object]:
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise bad_url("Expected a JSON object") from exc
+    if not isinstance(body, dict):
+        raise bad_url("Expected a JSON object")
+    return body
 
 
 @router.post("/api/extract")

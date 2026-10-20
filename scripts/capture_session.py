@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Open a headed browser on the host and save a Fernet auto-<host> session.
 
-Run this on a machine with a display, not inside the arachne container.
-The container stays headless. Docker Compose mounts ./data so the file
-written here is visible to the app at ARACHNE_SESSIONS_DIR.
+The admin button talks to scripts/arachne-host-helper so a person does not
+run this by hand. This entry remains for a machine where the helper is not
+installed. Run it on a machine with a display, not inside the container.
 
 Never prints cookie or Authorization values.
 
@@ -17,18 +17,16 @@ Example:
 from __future__ import annotations
 
 import argparse
+import select
 import sys
 from pathlib import Path
-from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.auto_session import auto_session_id  # noqa: E402
+from app.capture_broker import CaptureBroker, CaptureBusy, CaptureFailed, CaptureJob  # noqa: E402
 from app.errors import ArachneError  # noqa: E402
-from app.render import cookies_for_host  # noqa: E402
-from app.sessions import write_session_file  # noqa: E402
 from app.ssrf import parse_http_url  # noqa: E402
 
 
@@ -40,69 +38,62 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        _scheme, host, _port = parse_http_url(args.url)
+        parse_http_url(args.url)
     except ArachneError:
         print("url must be http(s) with a hostname", file=sys.stderr)
         return 1
 
+    broker = CaptureBroker()
     try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        print(
-            "playwright is not installed. On the host: "
-            "pip install -r requirements-playwright.txt && playwright install chromium",
-            file=sys.stderr,
-        )
+        job = broker.start(args.url)
+    except CaptureFailed as exc:
+        print(exc.message, file=sys.stderr)
+        return 1
+    except CaptureBusy:
+        print("another capture is already running", file=sys.stderr)
         return 1
 
+    print("Pass the wall in the browser, then press Enter here to save the session.")
+    print("If the challenge page clears on its own, the script saves without Enter.")
     try:
-        with sync_playwright() as playwright:
-            try:
-                browser = playwright.chromium.launch(headless=False)
-            except Exception:
-                print(
-                    "could not open a headed browser; run this on the host, not in the container",
-                    file=sys.stderr,
-                )
-                return 1
-            try:
-                context = browser.new_context()
-                page = context.new_page()
-                try:
-                    page.goto(args.url, wait_until="domcontentloaded", timeout=60_000)
-                except Exception:
-                    print(
-                        "navigation did not finish; the window stays open so you can pass the wall",
-                        file=sys.stderr,
-                    )
-                print("Pass the wall in the browser, then press Enter here to save the session.")
-                try:
-                    input()
-                except EOFError:
-                    print("no confirmation on stdin", file=sys.stderr)
-                    return 1
-                raw = context.cookies()
-            finally:
-                browser.close()
-    except Exception:
-        print("capture failed before a session file was written", file=sys.stderr)
+        early = _wait_for_enter(job)
+    except KeyboardInterrupt:
+        job.abort()
+        print("capture cancelled", file=sys.stderr)
         return 1
+    if early is not None:
+        return early
+    job.finished.wait(timeout=30)
+    state = job.public()
+    if state["status"] == "ready":
+        print(f"wrote {state['filename']}")
+        return 0
+    print(state["error"] or "capture failed", file=sys.stderr)
+    return 1
 
-    hostname = urlparse(args.url.strip()).hostname or host
-    cookies = cookies_for_host(raw, hostname)
-    if not cookies:
-        print("no cookies for this host; nothing written", file=sys.stderr)
+
+def _wait_for_enter(job: CaptureJob) -> int | None:
+    """Block until Enter, stdin EOF, or the runner finishes on its own.
+
+    Returns 1 when stdin closes before the person confirms. Otherwise None
+    and the caller waits for the runner to finish.
+    """
+    if sys.stdin.isatty():
+        while not job.finished.wait(timeout=0.25):
+            readable, _, _ = select.select([sys.stdin], [], [], 0)
+            if not readable:
+                continue
+            sys.stdin.readline()
+            job.request_done()
+        return None
+    line = sys.stdin.readline()
+    if line == "":
+        job.abort()
+        job.finished.wait(timeout=30)
+        print("no confirmation on stdin", file=sys.stderr)
         return 1
-
-    session_id = auto_session_id(args.url)
-    try:
-        path = write_session_file(session_id, cookies, {})
-    except ArachneError:
-        print("failed to write session", file=sys.stderr)
-        return 1
-
-    print(f"wrote {path.name}")
-    return 0
+    job.request_done()
+    return None
 
 
 if __name__ == "__main__":

@@ -92,7 +92,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="arachne",
-    version="0.11.0",
+    version="0.12.0",
     description=(
         "AI-agent service: URL → structured page JSON. Primary API is POST /extract; "
         "jobs reuse the same fetch. There is no /browse endpoint. "
@@ -101,7 +101,7 @@ app = FastAPI(
         "ARACHNE_AUTO_RENDER is on and Playwright is installed. render:true skips httpx. "
         "Those two errors add detail.needs_session, host, auto_session_id, and admin_hint. "
         "CAPTCHA and login walls need a human; no bypass tooling. "
-        "A localhost /admin UI can show the host capture command; it is not an agent API "
+        "A localhost /admin UI can open a headed browser on the host; it is not an agent API "
         "and is omitted from this schema. "
         "Single-instance intranet sidecar with optional API-key auth, SQLite jobs, "
         "profile suggest, queued QPS (ARACHNE_QPS / ARACHNE_QPS_MODE), "

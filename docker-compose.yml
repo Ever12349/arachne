@@ -14,6 +14,13 @@
 #   ARACHNE_ADMIN_TRUST_DOCKER personal published-port use. true lets /admin through when the
 #                              TCP peer is the Docker bridge but Host is 127.0.0.1 or localhost
 #                              (optional :port). X-Forwarded-For is ignored. Do not enable on a shared network.
+#   ARACHNE_IN_DOCKER          true in this file. The container must not open a Mac window.
+#   ARACHNE_HOST_HELPER_TOKEN  same value as the host helper. Empty until one-time install.
+#   ARACHNE_SESSION_KEY        same Fernet key the host helper uses to write auto-<host>.bin.
+#
+# The headed browser is NOT a compose service. On the Mac, run once:
+#   python scripts/install_host_helper.py
+# It listens on 127.0.0.1:18765 only. See ADMIN.md.
 #
 # Default `docker compose up` builds the slim image (no Chromium).
 # Playwright image: docker compose --profile playwright up --build arachne-playwright
@@ -26,6 +33,10 @@ services:
     restart: unless-stopped
     environment:
       ARACHNE_ADMIN_TRUST_DOCKER: "true"
+      ARACHNE_IN_DOCKER: "true"
+      ARACHNE_HOST_HELPER_TOKEN: ${ARACHNE_HOST_HELPER_TOKEN:-}
+      ARACHNE_HOST_HELPER_PORT: ${ARACHNE_HOST_HELPER_PORT:-18765}
+      ARACHNE_SESSION_KEY: ${ARACHNE_SESSION_KEY:-}
     volumes:
       - ./data:/app/data
 
@@ -39,5 +50,9 @@ services:
     restart: unless-stopped
     environment:
       ARACHNE_ADMIN_TRUST_DOCKER: "true"
+      ARACHNE_IN_DOCKER: "true"
+      ARACHNE_HOST_HELPER_TOKEN: ${ARACHNE_HOST_HELPER_TOKEN:-}
+      ARACHNE_HOST_HELPER_PORT: ${ARACHNE_HOST_HELPER_PORT:-18765}
+      ARACHNE_SESSION_KEY: ${ARACHNE_SESSION_KEY:-}
     volumes:
       - ./data:/app/data

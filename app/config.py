@@ -161,6 +161,9 @@ ADMIN_ENABLED = _env_bool("ARACHNE_ADMIN_ENABLED", True)
 # open /admin if the Host header is 127.0.0.1 or localhost, with an optional port.
 # X-Forwarded-For is never consulted. Default off.
 ADMIN_TRUST_DOCKER = _env_bool("ARACHNE_ADMIN_TRUST_DOCKER", False)
+# The host helper (127.0.0.1 only) reads ARACHNE_HOST_HELPER_TOKEN,
+# ARACHNE_HOST_HELPER_PORT, ARACHNE_IN_DOCKER, and ARACHNE_CAPTURE_MODE
+# on each request via app.hostcfg. They are not frozen here.
 FAILURE_RING_SIZE = 50
 
 LOG_JSON = _env_bool("ARACHNE_LOG_JSON", False)

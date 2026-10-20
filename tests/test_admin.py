@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -12,6 +13,7 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from app.admin.guard import host_is_local_docker_name, is_loopback_peer
+from app.capture_broker import CaptureBroker, CaptureFailed, set_local_broker
 from app.failures import FailureRing
 from app.fetch import ssrf_request_hook
 from app.main import app
@@ -147,12 +149,12 @@ def test_admin_reuses_api_key(loopback: TestClient, monkeypatch: pytest.MonkeyPa
     assert denied.status_code == 401
     allowed = loopback.get("/admin/api/status", headers={"X-Arachne-Key": "admin-shared-key"})
     assert allowed.status_code == 200
-    assert allowed.json()["version"] == "0.11.0"
+    assert allowed.json()["version"] == "0.12.0"
 
 
 def test_openapi_omits_admin_routes(loopback: TestClient):
     spec = loopback.get("/openapi.json").json()
-    assert spec["info"]["version"] == "0.11.0"
+    assert spec["info"]["version"] == "0.12.0"
     assert all(not path.startswith("/admin") for path in spec["paths"])
 
 
@@ -161,7 +163,7 @@ def test_dashboard_shows_version_and_flags(loopback: TestClient, monkeypatch: py
     monkeypatch.setattr("app.config.SESSION_KEY", SECRET_KEY_MARK)
     page = loopback.get("/admin")
     assert page.status_code == 200
-    assert "0.11.0" in page.text
+    assert "0.12.0" in page.text
     assert "仪表盘" in page.text
     body = loopback.get("/admin/api/status")
     payload = body.json()
@@ -269,7 +271,9 @@ def test_capture_poll_flips_when_file_appears(
     assert page.status_code == 200
     assert "新建会话" in page.text
     assert "重试抽取" in page.text
-    assert "scripts/capture_session.py" in page.text
+    assert "开始" in page.text
+    assert "复制命令" not in page.text
+    assert "scripts/capture_session.py" not in page.text
     assert SECRET_COOKIE not in page.text
     assert key not in page.text
 
@@ -414,9 +418,18 @@ def test_capture_script_rejects_non_http_without_writing(tmp_path: Path, monkeyp
     assert list(tmp_path.iterdir()) == []
 
 
+def test_hidden_buttons_stay_hidden():
+    """`button { display: inline-block }` must not override the hidden attribute."""
+    css = Path("app/templates/admin/base.html").read_text(encoding="utf-8")
+    assert "[hidden]" in css
+    assert "display: none !important" in css
+
+
 def test_manual_paste_fallback_is_on_empty_new_session(loopback: TestClient):
     page = loopback.get("/admin/sessions/new")
     assert "没有失败记录" in page.text
+    assert "开始" in page.text
+    assert "复制命令" not in page.text
     assert "<details open>" in page.text or "手动粘贴 Cookie" in page.text
     pasted = loopback.post(
         "/admin/sessions",
@@ -424,3 +437,202 @@ def test_manual_paste_fallback_is_on_empty_new_session(loopback: TestClient):
     )
     assert pasted.status_code == 400
     assert SECRET_COOKIE not in pasted.text
+
+
+def _no_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.admin.capture_launch.probe_helper", lambda: False)
+    monkeypatch.setenv("ARACHNE_DOTENV", "/nonexistent/arachne.env")
+
+
+def _waiting_runner(calls: dict[str, int]):
+    def runner(job):
+        calls["n"] += 1
+        job.mark("awaiting_user")
+        if not job.done_event.wait(3):
+            raise CaptureFailed("timed out", code="timed_out")
+        if job.abort_event.is_set():
+            raise CaptureFailed("采集已取消。", code="cancelled")
+        return {"sid": SECRET_COOKIE}
+
+    return runner
+
+
+def test_start_on_host_opens_local_job_and_done_writes_file(
+    loopback: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    _enable_key(monkeypatch)
+    monkeypatch.setattr("app.config.SESSIONS_DIR", str(tmp_path))
+    _no_helper(monkeypatch)
+    monkeypatch.setenv("ARACHNE_IN_DOCKER", "false")
+    monkeypatch.setenv("ARACHNE_CAPTURE_MODE", "auto")
+    calls = {"n": 0}
+    set_local_broker(CaptureBroker(runner=_waiting_runner(calls)))
+    try:
+        started = loopback.post("/admin/api/capture/start", json={"url": "https://example.com/article?q=1"})
+        assert started.status_code == 200
+        body = started.json()
+        assert body["ok"] is True
+        assert body["relay"] == "local"
+        assert body["session_id"] == "auto-example-com"
+        assert body["job_id"]
+        assert "token" not in body
+        assert SECRET_COOKIE not in started.text
+        assert calls["n"] == 1
+
+        waiting = loopback.get(f"/admin/api/capture/jobs/{body['job_id']}")
+        assert waiting.status_code == 200
+        assert waiting.json()["status"] in {"starting", "awaiting_user"}
+        assert SECRET_COOKIE not in waiting.text
+
+        done = loopback.post(f"/admin/api/capture/jobs/{body['job_id']}/done")
+        assert done.status_code == 200
+        assert SECRET_COOKIE not in done.text
+        deadline = time.monotonic() + 3
+        final = waiting.json()
+        while time.monotonic() < deadline:
+            final = loopback.get(f"/admin/api/capture/jobs/{body['job_id']}").json()
+            if final["status"] in {"ready", "failed"}:
+                break
+            time.sleep(0.05)
+        assert final["status"] == "ready"
+        assert final["ready"] is True
+        assert SECRET_COOKIE not in json.dumps(final)
+        assert (tmp_path / "auto-example-com.bin").is_file()
+    finally:
+        set_local_broker(None)
+
+
+def test_docker_start_relays_to_browser_without_spawning(
+    loopback: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    _enable_key(monkeypatch)
+    monkeypatch.setattr("app.config.SESSIONS_DIR", str(tmp_path))
+    _no_helper(monkeypatch)
+    monkeypatch.setenv("ARACHNE_IN_DOCKER", "true")
+    monkeypatch.setenv("ARACHNE_CAPTURE_MODE", "host")
+    monkeypatch.setenv("ARACHNE_HOST_HELPER_PORT", "18765")
+    token = "relay-token-9f3c2a7b"
+    monkeypatch.setenv("ARACHNE_HOST_HELPER_TOKEN", token)
+    calls = {"n": 0}
+    set_local_broker(CaptureBroker(runner=_waiting_runner(calls)))
+    try:
+        page = loopback.get("/admin/sessions/new", params={"url": "https://example.com/wall"})
+        assert token not in page.text
+        assert "复制命令" not in page.text
+        listed = loopback.get("/admin/api/capture", params={"url": "https://user:s3cret@example.com/wall"})
+        assert token not in listed.text
+        assert "s3cret" not in listed.text
+        started = loopback.post("/admin/api/capture/start", json={"url": "https://user:s3cret@example.com/wall"})
+        assert started.status_code == 200
+        body = started.json()
+        assert body["relay"] == "browser"
+        assert body["helper_origin"] == "http://127.0.0.1:18765"
+        assert body["token"] == token
+        assert "s3cret" not in started.text
+        assert calls["n"] == 0
+        assert list(tmp_path.glob("*.bin")) == []
+    finally:
+        set_local_broker(None)
+
+
+def test_docker_without_token_tells_you_to_install_once(
+    loopback: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    _enable_key(monkeypatch)
+    _no_helper(monkeypatch)
+    monkeypatch.setenv("ARACHNE_IN_DOCKER", "true")
+    monkeypatch.delenv("ARACHNE_HOST_HELPER_TOKEN", raising=False)
+    started = loopback.post("/admin/api/capture/start", json={"url": "https://example.com/wall"})
+    assert started.status_code == 503
+    body = started.json()
+    assert body["error"] == "helper_unavailable"
+    assert "install_host_helper.py" in body["message"]
+    assert "复制命令" not in started.text
+
+
+def test_admin_proxies_helper_and_hides_token(
+    loopback: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    _enable_key(monkeypatch)
+    token = "proxy-token-should-stay-server-side"
+    monkeypatch.setenv("ARACHNE_HOST_HELPER_TOKEN", token)
+    monkeypatch.setattr("app.admin.capture_launch.probe_helper", lambda: True)
+    seen: dict[str, object] = {}
+
+    def fake_request(method: str, path: str, got_token: str, payload: dict | None = None):
+        seen["method"] = method
+        seen["path"] = path
+        seen["token"] = got_token
+        seen["payload"] = payload
+        return 200, {
+            "job_id": "job-id-ok",
+            "url": "https://example.com/a",
+            "session_id": "auto-example-com",
+            "filename": "auto-example-com.bin",
+            "status": "starting",
+            "ready": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr("app.admin.capture_launch.helper_request", fake_request)
+    started = loopback.post("/admin/api/capture/start", json={"url": "https://example.com/a"})
+    assert started.status_code == 200
+    body = started.json()
+    assert body["relay"] == "admin"
+    assert body["job_id"] == "job-id-ok"
+    assert "token" not in body
+    assert token not in started.text
+    assert seen["token"] == token
+    assert seen["method"] == "POST"
+    assert seen["path"] == "/capture"
+
+    def fake_done(method: str, path: str, got_token: str, payload: dict | None = None):
+        seen["done_path"] = path
+        seen["done_method"] = method
+        return 200, {
+            "job_id": "job-id-ok",
+            "status": "awaiting_user",
+            "ready": False,
+            "error": None,
+            "session_id": "auto-example-com",
+            "filename": "auto-example-com.bin",
+            "url": "https://example.com/a",
+        }
+
+    monkeypatch.setattr("app.admin.capture_launch.helper_request", fake_done)
+    done = loopback.post("/admin/api/capture/jobs/job-id-ok/done")
+    assert done.status_code == 200
+    assert done.json()["job_id"] == "job-id-ok"
+    assert done.json()["relay"] == "admin"
+    assert token not in done.text
+    assert seen["done_method"] == "POST"
+    assert seen["done_path"] == "/capture/job-id-ok/done"
+
+
+def test_helper_rejection_does_not_spawn_a_second_browser(
+    loopback: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    _enable_key(monkeypatch)
+    monkeypatch.setenv("ARACHNE_HOST_HELPER_TOKEN", "t")
+    monkeypatch.setattr("app.admin.capture_launch.probe_helper", lambda: True)
+    calls = {"n": 0}
+    set_local_broker(CaptureBroker(runner=_waiting_runner(calls)))
+
+    def fake_request(method: str, path: str, got_token: str, payload: dict | None = None):
+        return 401, {"error": "unauthorized"}
+
+    monkeypatch.setattr("app.admin.capture_launch.helper_request", fake_request)
+    try:
+        started = loopback.post("/admin/api/capture/start", json={"url": "https://example.com/a"})
+        assert started.status_code == 401
+        assert started.json()["ok"] is False
+        assert calls["n"] == 0
+    finally:
+        set_local_broker(None)
+
+
+def test_capture_start_rejects_non_loopback(public_dns, monkeypatch: pytest.MonkeyPatch):
+    with _client(monkeypatch, "203.0.113.9") as client:
+        response = client.post("/admin/api/capture/start", json={"url": "https://example.com/a"})
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "forbidden"

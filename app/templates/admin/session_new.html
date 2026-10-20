@@ -3,42 +3,45 @@
 {% block body %}
 <h1>新建会话</h1>
 {% if url %}
-<p class="note">目标已填好。在<strong>宿主机</strong>上运行下面的命令（不要在容器里开有头浏览器）。通过墙之后在终端按 Enter，页面会看到 <code>auto-&lt;host&gt;.bin</code> 出现，再重试抽取。</p>
+<p class="note">点「开始」。这台电脑会打开有头浏览器（容器里不会）。通过验证码或登录后点「完成」，也可以等页面自己离开验证。出现会话文件后再重试抽取。</p>
 {% else %}
-<p class="note">通常从仪表盘或最近失败里点开 URL。只有没有失败记录时，才在这里粘贴地址。</p>
+<p class="note">通常从仪表盘或最近失败里点开 URL。也可以在这里填写地址后点「开始」。没有失败记录时，才用下面的 Cookie 粘贴。</p>
 {% endif %}
 
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 {% if saved_id %}<p class="ok">已写入 <code>{{ saved_id }}.bin</code>。响应里没有 Cookie 明文。</p>{% endif %}
 
-<form method="get" action="/admin/sessions/new">
-  <label for="url">URL</label>
-  <input id="url" name="url" type="text" value="{{ url }}" autocomplete="off" placeholder="https://example.com/article">
-  <p><button type="submit">生成采集命令</button></p>
-</form>
-
-{% if status %}
-<h2>宿主机采集命令</h2>
-{% if not status.session_key_configured %}
-<p class="error">当前进程没有可用的 <code>ARACHNE_SESSION_KEY</code>。先在运行命令的环境里导出密钥。页面不会显示密钥本身。</p>
+{% if status and not status.session_key_configured %}
+<p class="error">当前进程没有可用的 <code>ARACHNE_SESSION_KEY</code>。先配置密钥再点开始。页面不会显示密钥本身。</p>
 {% endif %}
-<p class="note">会话 id <code>{{ status.session_id }}</code> · 文件 <code>{{ status.filename }}</code>{% if status.ready %} · 已出现 {{ status.mtime }}{% else %} · 尚未出现{% endif %}</p>
-<pre class="cmd" id="capture-command">{{ status.command }}</pre>
-<p class="actions">
-  <button type="button" id="copy-cmd" class="ghost">复制命令</button>
-  {% if external_href %}
-  <a class="ghost btn" href="{{ external_href }}" target="_blank" rel="noopener noreferrer">打开原页</a>
+<p class="note" id="session-meta">
+  {% if status %}
+  会话 id <code id="session-id">{{ status.session_id }}</code>
+  · 文件 <code id="session-file">{{ status.filename }}</code>
+  {% if status.ready %} · 已出现 {{ status.mtime }}{% else %} · 尚未出现{% endif %}
   {% endif %}
 </p>
-<form id="retry-form" method="post" action="/admin/extract" {% if not status.ready %}hidden{% endif %}>
-  <input type="hidden" name="url" value="{{ status.url }}">
-  <input type="hidden" name="session_id" value="{{ status.session_id }}">
+<p id="capture-state" class="note"></p>
+<p id="capture-error" class="error" hidden></p>
+<form id="target-form" method="get" action="/admin/sessions/new">
+  <label for="url">URL</label>
+  <input id="url" name="url" type="text" value="{{ url }}" autocomplete="off" placeholder="https://example.com/article">
+  <p class="actions">
+    <button type="submit" id="start-btn">开始</button>
+    <button type="button" id="done-btn" hidden>完成</button>
+    {% if external_href %}
+    <a class="ghost btn" href="{{ external_href }}" target="_blank" rel="noopener noreferrer">打开原页</a>
+    {% endif %}
+  </p>
+</form>
+<form id="retry-form" method="post" action="/admin/extract" {% if not status or not status.ready %}hidden{% endif %}>
+  <input type="hidden" id="retry-url" name="url" value="{{ status.url if status else url }}">
+  <input type="hidden" id="retry-session" name="session_id" value="{{ status.session_id if status else '' }}">
   <button type="submit">重试抽取</button>
 </form>
-{% endif %}
 
 <details {% if not url %}open{% endif %}>
-  <summary>手动粘贴 Cookie（没有失败记录时的后备）</summary>
+  <summary>手动粘贴 Cookie（后备）</summary>
   <p class="note">扁平 JSON，形如 <code>{"sid":"abc"}</code>。写入和 <code>scripts/write_session.py</code> 相同的 Fernet 文件，默认 id 为 <code>auto-&lt;host&gt;</code>。</p>
   <form method="post" action="/admin/sessions">
     <label for="paste-url">URL</label>
@@ -49,31 +52,190 @@
   </form>
 </details>
 
-{% if status %}
 <script>
 (function () {
-  var pageUrl = {{ status.url | tojson }};
-  var ready = document.getElementById("retry-form");
-  var command = document.getElementById("capture-command");
-  var copy = document.getElementById("copy-cmd");
-  if (copy && command) {
-    copy.addEventListener("click", function () {
-      var text = command.textContent || "";
-      if (navigator.clipboard) {
-        navigator.clipboard.writeText(text);
-      }
-    });
+  var input = document.getElementById("url");
+  var startBtn = document.getElementById("start-btn");
+  var doneBtn = document.getElementById("done-btn");
+  var state = document.getElementById("capture-state");
+  var errorBox = document.getElementById("capture-error");
+  var retry = document.getElementById("retry-form");
+  var retryUrl = document.getElementById("retry-url");
+  var retrySession = document.getElementById("retry-session");
+  var meta = document.getElementById("session-meta");
+  var relay = null;
+
+  function currentUrl() {
+    return (input && input.value || "").trim();
   }
-  async function poll() {
+
+  function setState(text) {
+    if (state) state.textContent = text || "";
+  }
+
+  function setError(text) {
+    if (!errorBox) return;
+    errorBox.hidden = !text;
+    errorBox.textContent = text || "";
+    if (text) setState("");
+  }
+
+  function showRetry(url, sessionId) {
+    if (retryUrl && url) retryUrl.value = url;
+    if (retrySession && sessionId) retrySession.value = sessionId;
+    if (retry) retry.hidden = false;
+    if (doneBtn) doneBtn.hidden = true;
+    setState("会话已保存。可以重试抽取。");
+  }
+
+  function describe(data) {
+    if (!data) return;
+    if (data.session_id && meta && !document.getElementById("session-id")) {
+      meta.textContent = "会话 id " + data.session_id + " · 文件 " + (data.filename || "");
+    }
+    if (data.ready) {
+      showRetry(data.url || currentUrl(), data.session_id || "");
+      return;
+    }
+    if (data.status === "failed") {
+      setError(data.message || data.error || "采集失败。");
+      if (startBtn) startBtn.disabled = false;
+      if (doneBtn) doneBtn.hidden = true;
+      return;
+    }
+    if (data.status === "awaiting_user") {
+      setState("浏览器已打开。通过验证码或登录后点「完成」。");
+      if (doneBtn) doneBtn.hidden = false;
+      return;
+    }
+    if (data.status === "saving") {
+      setState("正在写入会话。");
+      return;
+    }
+    if (data.status === "starting" || data.job_id) {
+      setState("正在打开本机浏览器…");
+      if (doneBtn) doneBtn.hidden = false;
+    }
+  }
+
+  async function readJson(response) {
+    try {
+      return await response.json();
+    } catch (err) {
+      return {};
+    }
+  }
+
+  function messageFrom(data) {
+    if (!data) return "";
+    if (data.message) return data.message;
+    if (data.error && data.error.message) return data.error.message;
+    return "";
+  }
+
+  async function pollFile() {
+    var pageUrl = currentUrl();
+    if (!pageUrl) return;
     var response = await fetch("/admin/api/capture?url=" + encodeURIComponent(pageUrl));
     if (!response.ok) return;
     var data = await response.json();
-    if (command && data.command) command.textContent = data.command;
-    if (data.ready && ready) ready.hidden = false;
+    if (data.ready) showRetry(data.url || pageUrl, data.session_id || "");
   }
-  poll();
-  setInterval(poll, 2000);
+
+  async function pollJob() {
+    if (!relay || !relay.jobId) return;
+    var response;
+    if (relay.token) {
+      response = await fetch(relay.origin + "/capture/" + encodeURIComponent(relay.jobId), {
+        headers: {"Authorization": "Bearer " + relay.token}
+      });
+    } else {
+      response = await fetch("/admin/api/capture/jobs/" + encodeURIComponent(relay.jobId));
+    }
+    if (!response.ok) return;
+    describe(await readJson(response));
+  }
+
+  async function startCapture() {
+    var pageUrl = currentUrl();
+    setError("");
+    if (!pageUrl) {
+      setError("先填写 URL。");
+      return;
+    }
+    if (startBtn) startBtn.disabled = true;
+    setState("正在打开本机浏览器…");
+    var response = await fetch("/admin/api/capture/start", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({url: pageUrl})
+    });
+    var data = await readJson(response);
+    if (data.relay === "browser" && data.helper_origin && data.token) {
+      try {
+        var helperResponse = await fetch(data.helper_origin + "/capture", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + data.token
+          },
+          body: JSON.stringify({url: pageUrl})
+        });
+        var helperData = await readJson(helperResponse);
+        if (!helperResponse.ok) {
+          setError(helperData.message || "采集助手拒绝了这个请求。");
+          if (startBtn) startBtn.disabled = false;
+          return;
+        }
+        relay = {origin: data.helper_origin, token: data.token, jobId: helperData.job_id};
+        describe(helperData);
+      } catch (err) {
+        setError("连不上本机采集助手。在 Mac 上一次性执行：python scripts/install_host_helper.py");
+        if (startBtn) startBtn.disabled = false;
+      }
+      return;
+    }
+    if (!response.ok || data.ok === false) {
+      setError(messageFrom(data) || "无法开始采集。");
+      if (startBtn) startBtn.disabled = false;
+      return;
+    }
+    relay = {origin: "", token: "", jobId: data.job_id};
+    describe(data);
+  }
+
+  async function finishCapture() {
+    if (!relay || !relay.jobId) return;
+    if (doneBtn) doneBtn.disabled = true;
+    setState("正在保存会话。");
+    try {
+      if (relay.token) {
+        await fetch(relay.origin + "/capture/" + encodeURIComponent(relay.jobId) + "/done", {
+          method: "POST",
+          headers: {"Authorization": "Bearer " + relay.token}
+        });
+      } else {
+        await fetch("/admin/api/capture/jobs/" + encodeURIComponent(relay.jobId) + "/done", {method: "POST"});
+      }
+    } catch (err) {
+      setError("没能通知助手保存。");
+    }
+    if (doneBtn) doneBtn.disabled = false;
+  }
+
+  var form = document.getElementById("target-form");
+  if (form) {
+    form.addEventListener("submit", function (event) {
+      event.preventDefault();
+      startCapture();
+    });
+  }
+  if (doneBtn) doneBtn.addEventListener("click", finishCapture);
+  pollFile();
+  setInterval(function () {
+    pollFile();
+    pollJob();
+  }, 2000);
 })();
 </script>
-{% endif %}
 {% endblock %}
