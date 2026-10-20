@@ -94,28 +94,6 @@ async def test_public_hostname_with_mocked_dns(public_dns):
     await assert_public_http_url("https://example.com/path")
 
 
-@pytest.mark.asyncio
-async def test_mixed_private_and_public_dns_is_allowed(monkeypatch: pytest.MonkeyPatch):
-    """DNS pollution that still has a public address matches pin-IP: not bad_url."""
-
-    async def fake_resolve(host: str, port: int) -> list[str]:
-        return ["10.0.0.1", "192.168.1.1", "8.8.8.8"]
-
-    monkeypatch.setattr("app.ssrf.resolve_host_ips", fake_resolve)
-    await assert_public_http_url("https://example.com/path")
-
-
-@pytest.mark.asyncio
-async def test_dns_with_only_private_ips_is_bad_url(monkeypatch: pytest.MonkeyPatch):
-    async def fake_resolve(host: str, port: int) -> list[str]:
-        return ["10.0.0.1", "192.168.1.1", "127.0.0.1"]
-
-    monkeypatch.setattr("app.ssrf.resolve_host_ips", fake_resolve)
-    with pytest.raises(ArachneError) as exc:
-        await assert_public_http_url("https://example.com/path")
-    assert exc.value.code == "bad_url"
-
-
 def test_parse_http_url_defaults_port():
     scheme, host, port = parse_http_url("https://Example.com/a")
     assert scheme == "https"

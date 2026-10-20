@@ -27,7 +27,6 @@ from app.limits import FixedWindowRateLimiter, Stats, extract_semaphore
 from app.logging_setup import REQUEST_ID_HEADER, request_id_var, resolve_request_id, setup_logging
 from app.metrics import METRICS_CONTENT_TYPE, render_metrics
 from app.models import ErrorResponse, ExtractRequest, ExtractResponse, StatsResponse
-from app.admin.router import router as admin_router
 from app.profiles.loader import ProfileRegistry
 from app.profiles.router import router as profiles_router
 from app.service import run_extract
@@ -92,17 +91,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="arachne",
-    version="0.11.0",
+    version="0.10.0",
     description=(
         "AI-agent service: URL → structured page JSON. Primary API is POST /extract; "
         "jobs reuse the same fetch. There is no /browse endpoint. "
         "Access: httpx first; on a soft-wall code in ARACHNE_AUTO_RENDER_ON "
         "(default challenge and unauthorized), at most one Playwright retry when "
         "ARACHNE_AUTO_RENDER is on and Playwright is installed. render:true skips httpx. "
-        "Those two errors add detail.needs_session, host, auto_session_id, and admin_hint. "
         "CAPTCHA and login walls need a human; no bypass tooling. "
-        "A localhost /admin UI can show the host capture command; it is not an agent API "
-        "and is omitted from this schema. "
         "Single-instance intranet sidecar with optional API-key auth, SQLite jobs, "
         "profile suggest, queued QPS (ARACHNE_QPS / ARACHNE_QPS_MODE), "
         "optional ARACHNE_HTTP_PROXY, and Fernet auto-<host> sessions "
@@ -275,4 +271,3 @@ async def extract_post(
 
 app.include_router(jobs_router)
 app.include_router(profiles_router)
-app.include_router(admin_router)

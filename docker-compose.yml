@@ -11,9 +11,6 @@
 #   ARACHNE_AUTO_RENDER_ON     default challenge,unauthorized. Explicit empty selects no codes. Unknown tokens ignored.
 #   ARACHNE_SESSION_PERSIST    default true. After an accepted browser page, non-empty cookies may be written to
 #                              auto-<host>.bin. Reuse needs a valid ARACHNE_SESSION_KEY. false disables writes only.
-#   ARACHNE_ADMIN_TRUST_DOCKER personal published-port use. true lets /admin through when the
-#                              TCP peer is the Docker bridge but Host is 127.0.0.1 or localhost
-#                              (optional :port). X-Forwarded-For is ignored. Do not enable on a shared network.
 #
 # Default `docker compose up` builds the slim image (no Chromium).
 # Playwright image: docker compose --profile playwright up --build arachne-playwright
@@ -24,8 +21,6 @@ services:
     ports:
       - "8000:8000"
     restart: unless-stopped
-    environment:
-      ARACHNE_ADMIN_TRUST_DOCKER: "true"
     volumes:
       - ./data:/app/data
 
@@ -37,7 +32,5 @@ services:
     ports:
       - "8000:8000"
     restart: unless-stopped
-    environment:
-      ARACHNE_ADMIN_TRUST_DOCKER: "true"
     volumes:
       - ./data:/app/data

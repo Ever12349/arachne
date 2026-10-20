@@ -1,8 +1,8 @@
 # arachne 设计文档
 
-> 版本：v0.11.0 · 受众：维护者与调用方（AI Agent 系统）  
+> 版本：v0.10.0 · 受众：维护者与调用方（AI Agent 系统）  
 > 仓库：https://github.com/Ever12349/arachne  
-> 状态：0.11.0 增加本机 `/admin`（人用，不是 Agent 契约）以及软墙 `detail` 的 `needs_session`。P10′ 的调用方契约仍然有效：主入口是 `POST /extract`，没有 `/browse`。P9′ 已落地（调用方仍只 POST `url`；`challenge_detected` / `unauthorized_upstream` 可各回退一次 Playwright，并把浏览器 Cookie 写成 Fernet `auto-<host>`）。P8′（QPS 排队、`ARACHNE_HTTP_PROXY`、挑战页自动 Playwright）仍有效。单实例 / 内网 sidecar。P7a（可选 API key、`/ready`、httpx pin-IP、egress allowlist、JSON 日志、Prometheus `/metrics`）与 0.8.1 正文区域 `images` 仍有效。P6 半自动 profiles 与 P5 SQLite jobs 仍有效。Worker 仍为进程内 asyncio。**不要**多副本（无 Postgres/Redis）。TLS 终止在反向代理，应用本身只讲 HTTP。默认镜像仍不含浏览器（Compose profile `playwright` 才构建 `Dockerfile.playwright`）。无 OAuth / webhook / 密钥绑定客户端。会话仍为 Fernet 文件。可选 OpenAI 兼容 LLM（`ARACHNE_LLM_*`）仅用于 suggest。复用自动会话需要配置 `ARACHNE_SESSION_KEY`。有状态浏览器会话推迟；外部浏览器池不计划。
+> 状态：P10′ 只补调用方文档契约，**不改行为、不升版本**。P9′ 已落地（调用方仍只 POST `url`；`challenge_detected` / `unauthorized_upstream` 可各回退一次 Playwright，并把浏览器 Cookie 写成 Fernet `auto-<host>`）。P8′（QPS 排队、`ARACHNE_HTTP_PROXY`、挑战页自动 Playwright）仍有效。单实例 / 内网 sidecar。P7a（可选 API key、`/ready`、httpx pin-IP、egress allowlist、JSON 日志、Prometheus `/metrics`）与 0.8.1 正文区域 `images` 仍有效。P6 半自动 profiles 与 P5 SQLite jobs 仍有效。Worker 仍为进程内 asyncio。**不要**多副本（无 Postgres/Redis）。TLS 终止在反向代理，应用本身只讲 HTTP。默认镜像仍不含浏览器（Compose profile `playwright` 才构建 `Dockerfile.playwright`）。无 OAuth / webhook / 密钥绑定客户端。会话仍为 Fernet 文件。可选 OpenAI 兼容 LLM（`ARACHNE_LLM_*`）仅用于 suggest。复用自动会话需要配置 `ARACHNE_SESSION_KEY`。有状态浏览器会话推迟；外部浏览器池不计划。
 
 ## 1. 定位
 
@@ -45,7 +45,7 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 
 ## 3. API 契约（面向 Agent）
 
-契约版本 **0.11.0**。成功响应不新增字段。软墙错误 `detail` 增加 `needs_session`、`host`、`auto_session_id`、`admin_hint`。`/admin` 给人用，不在 OpenAPI 里，不是 Agent 必选接口。操作说明见仓库 `ADMIN.md`。
+契约版本 **0.10.0**。响应 JSON 不新增字段。
 
 ### 3.0 调用方契约（P10′，仅文档）
 
@@ -632,7 +632,7 @@ profiles/
 
 ### 4.5 SSRF（P0 + P7a pin-IP）
 
-流程：解析 URL → 可选 egress allowlist → `getaddrinfo` → 仅当**没有任何**公网地址时 `bad_url`（private / loopback / link-local / unspecified，含 IPv4-mapped IPv6）。混有内网与公网时与 pin-IP 相同：检查通过，连接只打到公网地址。
+流程：解析 URL → 可选 egress allowlist → `getaddrinfo` → 若地址为 private / loopback / link-local / unspecified（含 IPv4-mapped IPv6）则 `bad_url`。
 
 **httpx**：未设置 `ARACHNE_HTTP_PROXY` 时，自定义 `AsyncBaseTransport` 在现有公网检查之后，按 getaddrinfo 顺序对每个仍通过 `is_blocked_ip` 的 A/AAAA 做 TCP 连接；TLS 的 `server_hostname` / SNI 为**原始 host**；HTTP `Host` 仍为原始 hostname。连接/读超时沿用现有值。每个请求与每次跳转仍走 SSRF hook。设置了代理时改走 httpx proxy transport，不做 pin-IP；hook 与 `fetch_url` 里的公网 / allowlist 检查仍在。
 
@@ -766,19 +766,6 @@ profiles/
 - [x] 有状态浏览器会话（多步 / 人工交接）推迟；外部浏览器池不计划
 - [x] **不做**：新 `/browse`、扩大自动渲染触发集合、新响应字段、验证码破解
 
-### P11 — 本机管理后台（0.11.0）
-
-Agent 仍只 `POST /extract`。同一进程挂 `/admin`（Jinja2）。`/admin/api/*` 不进 OpenAPI。
-
-- [x] 复用 `ARACHNE_API_KEYS`。`ARACHNE_ADMIN_ENABLED` 默认 true，false 为 404
-- [x] 非 loopback 对端 403。`ARACHNE_ADMIN_TRUST_DOCKER`（默认 false；Compose 个人示例为 true）才在 Host 为 `127.0.0.1` 或 `localhost`（可带端口）时放行网桥对端。不看 `X-Forwarded-For`
-- [x] 软墙 detail：`needs_session`、`host`、`auto_session_id`、`admin_hint`。顶层错误码不变。成功体不新增字段
-- [x] 进程内失败环 50 条。仪表盘与最近失败里的 URL 链到已填好的「新建会话」
-- [x] `scripts/capture_session.py` 在宿主机开有头浏览器，写入 `auto-<host>.bin`。页面轮询文件出现后再试抽取。容器内 Playwright 仍 headless
-- [x] 无失败记录时才手贴 URL / 扁平 Cookie JSON。GET 不返回 Cookie 明文，没有导出接口
-- [x] `assert_public_http_url` 与 pin-IP 对齐：只在没有公网地址时 `bad_url`
-- [x] **不做**：验证码破解、容器内有头浏览器 / VNC、持久 Playwright context、Cookie 明文导出
-
 ## 6. 路线图总览
 
 ```mermaid
@@ -795,7 +782,6 @@ flowchart LR
   P7 --> P8[P8′ 傻瓜抽取]
   P8 --> P9[P9′ 自动会话]
   P9 --> P10[P10′ 调用方文档]
-  P10 --> P11[P11 本机后台]
 ```
 
 与用户后续需求的对应关系：
@@ -812,27 +798,25 @@ flowchart LR
 | 傻瓜抽取（排队 / 代理 / 自动渲染） | P8′ | 仍是单次 POST `url`；无多副本 |
 | 软墙后再试一次浏览器并记住 Cookie | P9′ | 仍是单次 POST `url`；不解验证码；复用要 `SESSION_KEY` |
 | 调用方怎么选入口与访问策略 | P10′ | 仅文档。主入口 `POST /extract`；无 `/browse` |
-| 人在本机过墙并重试 | P11 | `/admin` + 宿主机 `capture_session.py`。不是 Agent API |
 | 有状态浏览器会话（多步 / 人工交接） | 推迟 | 设计记录。不新增 API，不在 0.10.0 实现 |
 | 外部浏览器池 | 不计划 | 不做 |
 | 「认证绕过」 | **不实现攻击型绕过** | 以受控会话 + 明确错误码替代 |
 
 ## 7. 与当前仓库状态
 
-- 0.11.0：本机 `/admin`（默认开，`ARACHNE_ADMIN_ENABLED` 可关）、软墙 `detail.needs_session` 等四字段、宿主机 `scripts/capture_session.py`、失败环 50 条。成功响应不新增字段。OpenAPI 不含 `/admin`。`assert_public_http_url` 仅在没有公网 IP 时 `bad_url`
-- 0.10.0：`ARACHNE_AUTO_RENDER_ON`（含 `unauthorized_upstream`）、Fernet `auto-<host>` 读写；成功响应不新增字段；复用需要 `ARACHNE_SESSION_KEY`。P10′ 把同一行为写成调用方契约（§3.0）：无 `/browse`，验证码/登录墙要人，有状态浏览器会话推迟，外部浏览器池不计划
+- 0.10.0：`ARACHNE_AUTO_RENDER_ON`（含 `unauthorized_upstream`）、Fernet `auto-<host>` 读写；响应契约不新增字段；复用需要 `ARACHNE_SESSION_KEY`。P10′ 把同一行为写成调用方契约（§3.0）：无 `/browse`，验证码/登录墙要人，有状态浏览器会话推迟，外部浏览器池不计划
 - 0.9.0：QPS `queue`、`ARACHNE_HTTP_PROXY`、`challenge_detected` 自动 Playwright；响应契约不新增字段
 - 0.8.1：`ExtractResponse.images` 从正文区域收集 `<img>`；`metadata.og.image` 独立、不合并
 - P7a 已实现：可选 API key、`/ready`、httpx pin-IP、egress allowlist、JSON 日志、`/metrics`、profiles 写盘闸门
 - P6 仍有效：`POST /profiles/suggest` 与 `POST /profiles`；suggest 不写盘；写入需 `ARACHNE_PROFILES_WRITE=1`
 - P5 仍有效：同步 `/extract` 与批量 `/jobs`；jobs 落 SQLite；**单实例**，不要扩副本
 - 会话仍为 Fernet 文件；**无** PostgreSQL / Redis / webhook / OAuth；TLS 在反向代理
-- 运行时依赖钉死在 `requirements.txt`（`==`，含 `cachetools`、`cryptography`、`cssselect`、`sqlalchemy`、`aiosqlite`、`prometheus-client`、`jinja2`、`python-multipart`）；Playwright 见 `requirements-playwright.txt`；LLM 用 httpx，无额外 SDK
+- 运行时依赖钉死在 `requirements.txt`（`==`，含 `cachetools`、`cryptography`、`cssselect`、`sqlalchemy`、`aiosqlite`、`prometheus-client`）；Playwright 见 `requirements-playwright.txt`；LLM 用 httpx，无额外 SDK
 - 单元测试默认不访问网络、不需要浏览器；LLM / DNS / transport mock；活测：`ARACHNE_INTEGRATION=1 pytest -m integration`
 
 ## 8. 验收（P7a）
 
-1. `uvicorn app.main:app` 可在**未安装 Playwright**、**未配置 LLM key**、**REQUIRE_AUTH=false** 时启动；OpenAPI version `0.11.0`  
+1. `uvicorn app.main:app` 可在**未安装 Playwright**、**未配置 LLM key**、**REQUIRE_AUTH=false** 时启动；OpenAPI version `0.10.0`  
 2. `ARACHNE_REQUIRE_AUTH=true` 且 `ARACHNE_API_KEYS` 为空 → lifespan 拒绝启动  
 3. 鉴权开：无 key / 错 key → `unauthorized`（401）；Bearer 或 `X-Arachne-Key` 均可；`/health` 与 `/ready` 免鉴权；`/metrics`、`/stats` 受 `*_PUBLIC` 控制  
 4. `POST /profiles` 在 `ARACHNE_PROFILES_WRITE` 未开时 → `forbidden`（403），即使鉴权关闭  
