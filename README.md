@@ -100,6 +100,7 @@ export ARACHNE_PROFILES_WRITE=false      # POST /profiles needs this even when a
 export ARACHNE_EGRESS_ALLOWLIST=""       # comma-separated domain suffixes; empty = off
 export ARACHNE_LOG_JSON=false            # 1/true/yes → one JSON object per log line
 export ARACHNE_ADMIN_ENABLED=true        # localhost /admin for humans; false returns 404
+export ARACHNE_ADMIN_TRUST_DOCKER=false  # true: allow /admin from the Docker bridge when Host is 127.0.0.1 or localhost
 uvicorn app.main:app
 ```
 
@@ -552,7 +553,7 @@ Upstream 401/403 become `unauthorized_upstream` unless the body looks like a cha
 
 ## Local admin
 
-`/admin` is a localhost Jinja page for a person, not an agent endpoint (it is omitted from OpenAPI). Same API keys as `/extract`. `ARACHNE_ADMIN_ENABLED=false` hides it.
+`/admin` is a localhost Jinja page for a person, not an agent endpoint (it is omitted from OpenAPI). Same API keys as `/extract`. `ARACHNE_ADMIN_ENABLED=false` hides it. Personal Compose sets `ARACHNE_ADMIN_TRUST_DOCKER=true` so a published port can open `/admin` when the browser Host is `127.0.0.1` or `localhost`. See [ADMIN.md](ADMIN.md).
 
 Click a failed URL on the dashboard → the new-session page shows `python scripts/capture_session.py --url '…'` → run that on the host (headed browser) → the page sees `./data/sessions/auto-<host>.bin` → retry extract. Paste flat cookie JSON only when there is no failure row. Details: [ADMIN.md](ADMIN.md).
 

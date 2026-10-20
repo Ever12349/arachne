@@ -4,7 +4,7 @@
 
 ## 一键流程
 
-1. 在本机打开 `http://127.0.0.1:8000/admin`（TCP 对端必须是 loopback）。
+1. 在本机打开 `http://127.0.0.1:8000/admin`。直接跑 uvicorn 时，TCP 对端必须是 loopback。Compose 见下面的 `ARACHNE_ADMIN_TRUST_DOCKER`。
 2. 软墙失败（`challenge_detected` 或 `unauthorized_upstream`）出现在仪表盘和「最近失败」里。URL 是链接。
 3. 点 URL 或「为此建会话」。打开的「新建会话」已经填好这个 URL，并可以在新标签打开原页。
 4. 复制页面上的命令，在**宿主机**执行（不要在容器里开有头浏览器）。先导出与服务相同的 `ARACHNE_SESSION_KEY` 和 `ARACHNE_SESSIONS_DIR`。有头浏览器打开后，人工通过验证码或登录墙，回到终端按 Enter。
@@ -17,8 +17,8 @@
 
 - 复用 `ARACHNE_REQUIRE_AUTH` / `ARACHNE_API_KEYS`，没有单独的 admin key。
 - 关闭后台：`ARACHNE_ADMIN_ENABLED=false`（默认开启）。关闭后这些路径是 404。
-- 只看 TCP 对端是不是 loopback（`127.0.0.0/8`、`::1`、IPv4-mapped loopback）。不信任 `Host` 或 `X-Forwarded-For`。
-- `docker compose` 把端口发布到宿主机时，容器里看到的对端是网桥地址，不是 loopback，`/admin` 会 403。在宿主机跑 `uvicorn`，或在容器网络命名空间里访问 `127.0.0.1`。把发布地址写成 `127.0.0.1:8000:8000` 也不会改变容器内的对端地址。
+- 默认只看 TCP 对端是不是 loopback（`127.0.0.0/8`、`::1`、IPv4-mapped loopback）。不看 `X-Forwarded-For`。
+- 个人 Compose：`ARACHNE_ADMIN_TRUST_DOCKER=true`（默认 false）。此时对端可以是 Docker 网桥，但请求的 `Host` 必须是 `127.0.0.1` 或 `localhost`，可以带数字端口（`127.0.0.1:8000`）。其它 Host 仍然 403。仓库里的 `docker-compose.yml` 为个人使用设了这个变量。不要在共享网络上打开它；鉴权仍然走 `ARACHNE_API_KEYS`。
 
 ## 采集命令
 

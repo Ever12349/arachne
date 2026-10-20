@@ -11,7 +11,7 @@ import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
-from app.admin.guard import is_loopback_peer
+from app.admin.guard import host_is_local_docker_name, is_loopback_peer
 from app.failures import FailureRing
 from app.fetch import ssrf_request_hook
 from app.main import app
@@ -75,6 +75,63 @@ def test_admin_rejects_non_loopback(public_dns, monkeypatch: pytest.MonkeyPatch,
         response = client.get(path, headers={"Host": "127.0.0.1"})
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "forbidden"
+
+
+@pytest.mark.parametrize(
+    "host_header,allowed",
+    [
+        ("127.0.0.1", True),
+        ("127.0.0.1:8000", True),
+        ("localhost", True),
+        ("LocalHost:8000", True),
+        ("example.com", False),
+        ("example.com:443", False),
+        ("10.0.0.1", False),
+        ("127.0.0.1:abc", False),
+        ("", False),
+    ],
+)
+def test_admin_trust_docker_allows_local_host_header(
+    public_dns, monkeypatch: pytest.MonkeyPatch, host_header: str, allowed: bool
+):
+    monkeypatch.setattr("app.config.ADMIN_TRUST_DOCKER", True)
+    headers = {"Host": host_header} if host_header else {}
+    with _client(monkeypatch, "172.17.0.1") as client:
+        response = client.get("/admin", headers=headers)
+    if allowed:
+        assert response.status_code == 200
+        assert "仪表盘" in response.text
+    else:
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "forbidden"
+
+
+def test_admin_trust_docker_ignores_forwarded_for(public_dns, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("app.config.ADMIN_TRUST_DOCKER", True)
+    with _client(monkeypatch, "172.17.0.1") as client:
+        response = client.get(
+            "/admin/api/sessions",
+            headers={"Host": "example.com", "X-Forwarded-For": "127.0.0.1"},
+        )
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "forbidden"
+
+
+def test_admin_trust_docker_still_404_when_disabled(public_dns, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("app.config.ADMIN_TRUST_DOCKER", True)
+    monkeypatch.setattr("app.config.ADMIN_ENABLED", False)
+    with _client(monkeypatch, "172.17.0.1") as client:
+        response = client.get("/admin", headers={"Host": "127.0.0.1:8000"})
+    assert response.status_code == 404
+
+
+def test_host_is_local_docker_name():
+    assert host_is_local_docker_name("127.0.0.1") is True
+    assert host_is_local_docker_name("localhost:8000") is True
+    assert host_is_local_docker_name("LOCALHOST") is True
+    assert host_is_local_docker_name("[::1]") is False
+    assert host_is_local_docker_name("127.0.0.1.evil.test") is False
+    assert host_is_local_docker_name(None) is False
 
 
 def test_admin_disabled_is_404(loopback: TestClient, monkeypatch: pytest.MonkeyPatch):

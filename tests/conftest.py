@@ -124,6 +124,7 @@ def _p7_safe_defaults(tmp_path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("app.config.SESSIONS_DIR", str(tmp_path / "sessions"))
     monkeypatch.setattr("app.config.HTTP_PROXY", "")
     monkeypatch.setattr("app.config.ADMIN_ENABLED", True)
+    monkeypatch.setattr("app.config.ADMIN_TRUST_DOCKER", False)
 
 
 @pytest.fixture(autouse=True)

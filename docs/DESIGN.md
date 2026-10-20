@@ -771,7 +771,7 @@ profiles/
 Agent 仍只 `POST /extract`。同一进程挂 `/admin`（Jinja2）。`/admin/api/*` 不进 OpenAPI。
 
 - [x] 复用 `ARACHNE_API_KEYS`。`ARACHNE_ADMIN_ENABLED` 默认 true，false 为 404
-- [x] 非 loopback 对端 403。不看 Host / X-Forwarded-For
+- [x] 非 loopback 对端 403。`ARACHNE_ADMIN_TRUST_DOCKER`（默认 false；Compose 个人示例为 true）才在 Host 为 `127.0.0.1` 或 `localhost`（可带端口）时放行网桥对端。不看 `X-Forwarded-For`
 - [x] 软墙 detail：`needs_session`、`host`、`auto_session_id`、`admin_hint`。顶层错误码不变。成功体不新增字段
 - [x] 进程内失败环 50 条。仪表盘与最近失败里的 URL 链到已填好的「新建会话」
 - [x] `scripts/capture_session.py` 在宿主机开有头浏览器，写入 `auto-<host>.bin`。页面轮询文件出现后再试抽取。容器内 Playwright 仍 headless
