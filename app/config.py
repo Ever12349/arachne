@@ -154,4 +154,13 @@ PROFILES_WRITE = _env_bool("ARACHNE_PROFILES_WRITE", False)
 # Empty = disabled. Matched as host == suffix or host.endswith('.' + suffix).
 EGRESS_ALLOWLIST = _env_csv("ARACHNE_EGRESS_ALLOWLIST")
 
+# Human /admin UI on this process. False hides the routes (404). Default on.
+# Loopback peer check still applies when this is true. Not a separate admin key.
+ADMIN_ENABLED = _env_bool("ARACHNE_ADMIN_ENABLED", True)
+# Personal Compose only. When true, a non-loopback peer (the Docker bridge) may
+# open /admin if the Host header is 127.0.0.1 or localhost, with an optional port.
+# X-Forwarded-For is never consulted. Default off.
+ADMIN_TRUST_DOCKER = _env_bool("ARACHNE_ADMIN_TRUST_DOCKER", False)
+FAILURE_RING_SIZE = 50
+
 LOG_JSON = _env_bool("ARACHNE_LOG_JSON", False)
