@@ -1,10 +1,13 @@
 """SSRF guards: only public http(s) URLs, resolved before fetch.
 
-Direct httpx connects via PinIPAsyncTransport (TCP to the resolved public IP,
-TLS server_hostname = original host). When ARACHNE_HTTP_PROXY is set, httpx
-uses that proxy instead of pin-IP; assert_public_http_url still runs first.
-Playwright navigates by hostname (through the same proxy when set) and is not
-pin-IP, so the render path keeps a DNS-rebinding window; see docs/DESIGN.md.
+Direct httpx connects via PinIPAsyncTransport (TCP to each resolved public IP,
+TLS server_hostname = original host). `assert_public_http_url` matches that
+rule: `bad_url` only when every resolved address is non-public. A mixed
+private+public answer is allowed here; the transport then skips the private
+addresses. When ARACHNE_HTTP_PROXY is set, httpx uses that proxy instead of
+pin-IP; this check still runs first. Playwright navigates by hostname (through
+the same proxy when set) and is not pin-IP, so the render path keeps a
+DNS-rebinding window; see docs/DESIGN.md.
 """
 
 from __future__ import annotations
@@ -80,14 +83,17 @@ async def resolve_host_ips(host: str, port: int) -> list[str]:
 
 
 async def assert_public_http_url(url: str) -> None:
-    """Validate scheme, optional egress allowlist, and reject non-public addresses."""
+    """Validate scheme, optional egress allowlist, and require one public address.
+
+    Mixed DNS (a private address beside a public one) is not `bad_url`. Pin-IP
+    connects only to the public addresses; this gate uses the same leftover rule.
+    """
     from app.egress import assert_egress_allowed
 
     _scheme, host, port = parse_http_url(url)
     assert_egress_allowed(host)
     ips = await resolve_host_ips(host, port)
-    blocked = [ip for ip in ips if is_blocked_ip(ip)]
-    if blocked:
+    if not any(not is_blocked_ip(ip) for ip in ips):
         raise bad_url(
             "URL points to a non-public address",
             {"host": host},

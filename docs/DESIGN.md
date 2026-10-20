@@ -632,7 +632,7 @@ profiles/
 
 ### 4.5 SSRF（P0 + P7a pin-IP）
 
-流程：解析 URL → 可选 egress allowlist → `getaddrinfo` → 若地址为 private / loopback / link-local / unspecified（含 IPv4-mapped IPv6）则 `bad_url`。
+流程：解析 URL → 可选 egress allowlist → `getaddrinfo` → 只在解析结果里没有任何公网地址时 `bad_url`。private / loopback / link-local / unspecified（含 IPv4-mapped IPv6）若和公网地址混在一起，不因此拒绝；pin-IP 只连公网地址。
 
 **httpx**：未设置 `ARACHNE_HTTP_PROXY` 时，自定义 `AsyncBaseTransport` 在现有公网检查之后，按 getaddrinfo 顺序对每个仍通过 `is_blocked_ip` 的 A/AAAA 做 TCP 连接；TLS 的 `server_hostname` / SNI 为**原始 host**；HTTP `Host` 仍为原始 hostname。连接/读超时沿用现有值。每个请求与每次跳转仍走 SSRF hook。设置了代理时改走 httpx proxy transport，不做 pin-IP；hook 与 `fetch_url` 里的公网 / allowlist 检查仍在。
 
