@@ -1,8 +1,8 @@
 # arachne 设计文档
 
-> 版本：v0.10.0 · 受众：维护者与调用方（AI Agent 系统）  
+> 版本：v0.10.1 · 受众：维护者与调用方（AI Agent 系统）  
 > 仓库：https://github.com/Ever12349/arachne  
-> 状态：P10′ 只补调用方文档契约，**不改行为、不升版本**。P9′ 已落地（调用方仍只 POST `url`；`challenge_detected` / `unauthorized_upstream` 可各回退一次 Playwright，并把浏览器 Cookie 写成 Fernet `auto-<host>`）。P8′（QPS 排队、`ARACHNE_HTTP_PROXY`、挑战页自动 Playwright）仍有效。单实例 / 内网 sidecar。P7a（可选 API key、`/ready`、httpx pin-IP、egress allowlist、JSON 日志、Prometheus `/metrics`）与 0.8.1 正文区域 `images` 仍有效。P6 半自动 profiles 与 P5 SQLite jobs 仍有效。Worker 仍为进程内 asyncio。**不要**多副本（无 Postgres/Redis）。TLS 终止在反向代理，应用本身只讲 HTTP。默认镜像仍不含浏览器（Compose profile `playwright` 才构建 `Dockerfile.playwright`）。无 OAuth / webhook / 密钥绑定客户端。会话仍为 Fernet 文件。可选 OpenAI 兼容 LLM（`ARACHNE_LLM_*`）仅用于 suggest。复用自动会话需要配置 `ARACHNE_SESSION_KEY`。有状态浏览器会话推迟；外部浏览器池不计划。
+> 状态：0.10.1 在 httpx `/extract` 路径上对不完整 TLS 链做一次 AIA 补齐，并可选加载 `./data/ca-bundle.pem`。不关闭校验，不默认信任代理 MITM CA。P10′ 调用方文档契约仍有效。P9′ 已落地（调用方仍只 POST `url`；`challenge_detected` / `unauthorized_upstream` 可各回退一次 Playwright，并把浏览器 Cookie 写成 Fernet `auto-<host>`）。P8′（QPS 排队、`ARACHNE_HTTP_PROXY`、挑战页自动 Playwright）仍有效。单实例 / 内网 sidecar。P7a（可选 API key、`/ready`、httpx pin-IP、egress allowlist、JSON 日志、Prometheus `/metrics`）与 0.8.1 正文区域 `images` 仍有效。P6 半自动 profiles 与 P5 SQLite jobs 仍有效。Worker 仍为进程内 asyncio。**不要**多副本（无 Postgres/Redis）。TLS 终止在反向代理，应用本身只讲 HTTP。默认镜像仍不含浏览器（Compose profile `playwright` 才构建 `Dockerfile.playwright`）。无 OAuth / webhook / 密钥绑定客户端。会话仍为 Fernet 文件。可选 OpenAI 兼容 LLM（`ARACHNE_LLM_*`）仅用于 suggest。复用自动会话需要配置 `ARACHNE_SESSION_KEY`。有状态浏览器会话推迟；外部浏览器池不计划。
 
 ## 1. 定位
 
@@ -45,7 +45,7 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 
 ## 3. API 契约（面向 Agent）
 
-契约版本 **0.10.0**。响应 JSON 不新增字段。
+契约版本 **0.10.1**。响应 JSON 不新增字段。不完整 TLS 链在 httpx 路径上最多补齐一次；成功体不变。
 
 ### 3.0 调用方契约（P10′，仅文档）
 
@@ -567,7 +567,8 @@ app/
   ssrf.py            # getaddrinfo + 非公网地址拒绝
   egress.py          # 用户抓取 URL 的域名后缀 allowlist
   transport.py       # httpx pin-IP（TCP 连解析到的公网 IP；TLS server_hostname=原 host）
-  fetch.py           # httpx 异步拉取（可选 headers/cookies）
+  fetch.py           # httpx 异步拉取（可选 headers/cookies）；不完整链时一次临时 client
+  tls_aia.py         # 叶子证书 / AIA 下载 / 信任上下文（certifi + 可选 bundle + 中间证书）
   extract.py         # HTML → 字段；apply_max_chars
   headers_policy.py  # 请求头允许名单
   cache.py           # URL 规范化、会话指纹、TTLCache
@@ -615,6 +616,7 @@ profiles/
 - 缓存：`TTLCache` TTL=60s、maxsize=256（`ARACHNE_CACHE_TTL_SECONDS`、`ARACHNE_CACHE_MAXSIZE`）
 - 缓存键：规范化 URL（scheme/host 小写、去掉默认端口与 fragment、**保留 query 原顺序**）+ 会话指纹（合并后的 headers/cookies canonical JSON 再 sha256）+ `render` 标志 + `ua_strategy` + `profile_id@version`（无 profile 时该段为空字符串）。自动渲染成功后**写入**的 render 位为 `1`
 - HTTP 代理：只读 `ARACHNE_HTTP_PROXY`（`app/config.py`，空=关）。有值时 httpx 走 proxy transport、**不用** `PinIPAsyncTransport`，`trust_env=false`（忽略 `HTTP_PROXY`/`HTTPS_PROXY`）。请求前仍 `assert_public_http_url` + egress。Playwright `launch(proxy=…)` 使用同一 URL（userinfo 拆成 username/password）。日志与错误 detail 去掉 userinfo。非法 URL → `fetch_failed`。请求体没有 proxy 字段
+- 不完整 TLS 链（0.10.1）：仅当 connect 失败文本是缺中间证书（`unable to get local issuer` 等，不是过期或主机名不匹配）时，**最多一次** AIA。叶子用 arachne httpx 抓（同一代理 / pin-IP / SSRF；`CERT_NONE` 只用于读叶子，不带调用方 Cookie，不把响应当正文）。AIA URL 用 5s httpx 下载并 `assert_public_http_url`。不用 aia-chaser 的 `make_ssl_context_for_url`（叶子是直连 socket，AIA 走 urllib）。追到的中间证书必须能验回 certifi 或 bundle 里的根。临时 `SSLContext` = certifi + 可选 `./data/ca-bundle.pem` + 这些中间证书。共享 lifespan client 的 verify 仍是默认（加上合法 bundle），不写回补齐结果。进程内缓存键为 issuer/AKI，没有 AKI 时用 issuer。bundle 缺失或空 = 现行为；非法 PEM 记日志后忽略。没有 `ARACHNE_CA_BUNDLE`、没有 YAML、没有 AIA 开关。失败 `detail.kind=ssl`（antibot 不当 connect 重试，也不进 `AUTO_RENDER_ON`）；AIA 失败保留原始错误。成功日志 `host` + `aia_recovered=1`，成功 JSON 不新增字段。这是不完整链恢复，不是默认信任 Clash 或其他 MITM CA
 - 只缓存成功 `ExtractResponse`，不缓存错误（含 `challenge_detected` / `render_*` / `session_invalid` / `profile_invalid`）
 - 会话：`ARACHNE_SESSIONS_DIR`（默认 `./data/sessions`）、`ARACHNE_SESSION_KEY`
 - 站点规则：`ARACHNE_PROFILES_DIR`（默认 `./data/profiles`，可为空）；热加载 debounce 1s
@@ -766,6 +768,18 @@ profiles/
 - [x] 有状态浏览器会话（多步 / 人工交接）推迟；外部浏览器池不计划
 - [x] **不做**：新 `/browse`、扩大自动渲染触发集合、新响应字段、验证码破解
 
+### 0.10.1 — 不完整证书链（已实现）
+
+httpx 拉取遇到缺中间证书时补齐一次。响应契约不新增字段。不把 `fetch_failed` / `ssl` 放进 `ARACHNE_AUTO_RENDER_ON`。不改 LLM 的 httpx client，不改 Playwright 行为。
+
+- [x] 触发只限链不完整类原因（`CERTIFICATE_VERIFY_FAILED` 且 `unable to get local issuer` 等）。过期、主机名不匹配不追 AIA，但仍是 `kind=ssl`
+- [x] 最多一次临时 `AsyncClient(verify=组装后的上下文)`。共享 client 保持默认校验，外加可选 `./data/ca-bundle.pem`
+- [x] 叶子与 AIA 下载走同一 `ARACHNE_HTTP_PROXY` / pin-IP / SSRF。`CERT_NONE` 只用于读叶子。同步密码学与 `aia_chase_cert` 放在 `asyncio.to_thread`；AIA HTTP 留在事件循环（短超时，对齐 connect 5s）
+- [x] 不用 `make_ssl_context_for_url` / `fetch_ca_chain_for_host`（后者 `[:1]` 丢掉中间证书）。中间证书要能验回已信任的根
+- [x] 可选多 PEM `./data/ca-bundle.pem`。缺失或空 = 现行为。非法 PEM 软失败（日志 + 忽略，回退 certifi）。`.gitignore` 忽略该文件。Compose 只说明 PEM 放在 `./data/`，不默认挂载 Clash CA
+- [x] 依赖钉 `aia-chaser==3.4.1`（tenacity 作为传递依赖即可）
+- [x] **不做**：`ARACHNE_CA_BUNDLE`、YAML、AIA 开关、成功 JSON 新字段、把校验关掉去“总是信任 Clash”
+
 ## 6. 路线图总览
 
 ```mermaid
@@ -804,6 +818,7 @@ flowchart LR
 
 ## 7. 与当前仓库状态
 
+- 0.10.1：httpx 不完整 TLS 链最多 AIA 一次（`kind=ssl` 不重试、不自动渲染）；可选 `./data/ca-bundle.pem`。响应契约不新增字段。不默认信任代理 MITM CA
 - 0.10.0：`ARACHNE_AUTO_RENDER_ON`（含 `unauthorized_upstream`）、Fernet `auto-<host>` 读写；响应契约不新增字段；复用需要 `ARACHNE_SESSION_KEY`。P10′ 把同一行为写成调用方契约（§3.0）：无 `/browse`，验证码/登录墙要人，有状态浏览器会话推迟，外部浏览器池不计划
 - 0.9.0：QPS `queue`、`ARACHNE_HTTP_PROXY`、`challenge_detected` 自动 Playwright；响应契约不新增字段
 - 0.8.1：`ExtractResponse.images` 从正文区域收集 `<img>`；`metadata.og.image` 独立、不合并
@@ -811,12 +826,12 @@ flowchart LR
 - P6 仍有效：`POST /profiles/suggest` 与 `POST /profiles`；suggest 不写盘；写入需 `ARACHNE_PROFILES_WRITE=1`
 - P5 仍有效：同步 `/extract` 与批量 `/jobs`；jobs 落 SQLite；**单实例**，不要扩副本
 - 会话仍为 Fernet 文件；**无** PostgreSQL / Redis / webhook / OAuth；TLS 在反向代理
-- 运行时依赖钉死在 `requirements.txt`（`==`，含 `cachetools`、`cryptography`、`cssselect`、`sqlalchemy`、`aiosqlite`、`prometheus-client`）；Playwright 见 `requirements-playwright.txt`；LLM 用 httpx，无额外 SDK
+- 运行时依赖钉死在 `requirements.txt`（`==`，含 `cachetools`、`cryptography`、`aia-chaser`、`cssselect`、`sqlalchemy`、`aiosqlite`、`prometheus-client`）；Playwright 见 `requirements-playwright.txt`；LLM 用 httpx，无额外 SDK
 - 单元测试默认不访问网络、不需要浏览器；LLM / DNS / transport mock；活测：`ARACHNE_INTEGRATION=1 pytest -m integration`
 
 ## 8. 验收（P7a）
 
-1. `uvicorn app.main:app` 可在**未安装 Playwright**、**未配置 LLM key**、**REQUIRE_AUTH=false** 时启动；OpenAPI version `0.10.0`  
+1. `uvicorn app.main:app` 可在**未安装 Playwright**、**未配置 LLM key**、**REQUIRE_AUTH=false** 时启动；OpenAPI version `0.10.1`  
 2. `ARACHNE_REQUIRE_AUTH=true` 且 `ARACHNE_API_KEYS` 为空 → lifespan 拒绝启动  
 3. 鉴权开：无 key / 错 key → `unauthorized`（401）；Bearer 或 `X-Arachne-Key` 均可；`/health` 与 `/ready` 免鉴权；`/metrics`、`/stats` 受 `*_PUBLIC` 控制  
 4. `POST /profiles` 在 `ARACHNE_PROFILES_WRITE` 未开时 → `forbidden`（403），即使鉴权关闭  

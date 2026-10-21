@@ -6,9 +6,13 @@ unchanged. Playwright is not pinned — see docs/DESIGN.md.
 create_http_client() uses this transport only when ARACHNE_HTTP_PROXY is empty.
 A configured proxy uses httpx's proxy transport instead, and still runs
 assert_public_http_url (including the egress allowlist) before the request.
+``verify`` is applied to the inner transport (a custom transport argument is
+used as-is). ``trust_env`` stays off so SSL_CERT_FILE / HTTP_PROXY do not apply.
 """
 
 from __future__ import annotations
+
+import ssl
 
 import httpx
 
@@ -37,8 +41,16 @@ def pin_request_to_ip(request: httpx.Request, ip: str, original_host: str) -> ht
 class PinIPAsyncTransport(httpx.AsyncBaseTransport):
     """Resolve, skip non-public IPs, then TCP-connect to each remaining address."""
 
-    def __init__(self, transport: httpx.AsyncBaseTransport | None = None) -> None:
-        self._transport = transport if transport is not None else httpx.AsyncHTTPTransport()
+    def __init__(
+        self,
+        transport: httpx.AsyncBaseTransport | None = None,
+        *,
+        verify: bool | ssl.SSLContext = True,
+    ) -> None:
+        if transport is not None:
+            self._transport = transport
+        else:
+            self._transport = httpx.AsyncHTTPTransport(verify=verify, trust_env=False)
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         host = request.url.host

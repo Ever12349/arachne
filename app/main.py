@@ -91,13 +91,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="arachne",
-    version="0.10.0",
+    version="0.10.1",
     description=(
         "AI-agent service: URL → structured page JSON. Primary API is POST /extract; "
         "jobs reuse the same fetch. There is no /browse endpoint. "
         "Access: httpx first; on a soft-wall code in ARACHNE_AUTO_RENDER_ON "
         "(default challenge and unauthorized), at most one Playwright retry when "
         "ARACHNE_AUTO_RENDER is on and Playwright is installed. render:true skips httpx. "
+        "Incomplete TLS chains on the httpx path are recovered once from AIA; "
+        "optional ./data/ca-bundle.pem adds trust anchors and verification stays on. "
         "CAPTCHA and login walls need a human; no bypass tooling. "
         "Single-instance intranet sidecar with optional API-key auth, SQLite jobs, "
         "profile suggest, queued QPS (ARACHNE_QPS / ARACHNE_QPS_MODE), "

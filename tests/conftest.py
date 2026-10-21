@@ -126,6 +126,17 @@ def _p7_safe_defaults(tmp_path, monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_ca_bundle(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """Keep unit tests off a developer ./data/ca-bundle.pem and the AIA cache."""
+    from app import tls_aia
+
+    monkeypatch.setattr(tls_aia, "CA_BUNDLE_PATH", str(tmp_path / "no-such-ca-bundle.pem"))
+    tls_aia.clear_caches()
+    yield
+    tls_aia.clear_caches()
+
+
+@pytest.fixture(autouse=True)
 def _fast_retry_backoff(monkeypatch: pytest.MonkeyPatch):
     """Unit tests should not wait on real retry sleeps."""
 

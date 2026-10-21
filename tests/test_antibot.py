@@ -35,6 +35,7 @@ def test_challenge_markers_match_fixtures():
 def test_retryable_only_timeout_and_connect():
     assert is_retryable(timeout_error()) is True
     assert is_retryable(fetch_failed("x", {"kind": "connect"})) is True
+    assert is_retryable(fetch_failed("x", {"kind": "ssl"})) is False
     assert is_retryable(fetch_failed("x")) is False
     assert is_retryable(ArachneError("challenge_detected", "nope")) is False
     assert is_retryable(ArachneError("too_large", "nope")) is False
@@ -109,6 +110,11 @@ def test_timeout_is_retried_then_succeeds(public_dns, monkeypatch: pytest.Monkey
 def test_connect_error_is_retried(public_dns, monkeypatch: pytest.MonkeyPatch):
     counts = {"n": 0}
 
+    async def forbid_aia(_url: str):
+        raise AssertionError("connect errors must not chase AIA")
+
+    monkeypatch.setattr("app.fetch.recover_verify_context", forbid_aia)
+
     def handler(request: httpx.Request) -> httpx.Response:
         counts["n"] += 1
         raise httpx.ConnectError("connection refused", request=request)
@@ -117,8 +123,38 @@ def test_connect_error_is_retried(public_dns, monkeypatch: pytest.MonkeyPatch):
         set_high_qps(client)
         response = client.post("/extract", json={"url": "https://example.com/"})
     assert response.status_code == 502
-    assert response.json()["error"]["code"] == "fetch_failed"
+    body = response.json()["error"]
+    assert body["code"] == "fetch_failed"
+    assert body["detail"]["kind"] == "connect"
     assert counts["n"] == 3
+
+
+def test_ssl_chain_error_is_not_retried(public_dns, monkeypatch: pytest.MonkeyPatch):
+    counts = {"n": 0, "aia": 0}
+
+    async def no_recover(_url: str):
+        counts["aia"] += 1
+        return None
+
+    monkeypatch.setattr("app.fetch.recover_verify_context", no_recover)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        counts["n"] += 1
+        raise httpx.ConnectError(
+            "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+            "unable to get local issuer certificate",
+            request=request,
+        )
+
+    with _client_with_handler(monkeypatch, handler) as client:
+        set_high_qps(client)
+        response = client.post("/extract", json={"url": "https://example.com/"})
+    assert response.status_code == 502
+    body = response.json()["error"]
+    assert body["code"] == "fetch_failed"
+    assert body["detail"]["kind"] == "ssl"
+    assert "unable to get local issuer certificate" in body["detail"]["reason"]
+    assert counts == {"n": 1, "aia": 1}
 
 
 def test_http_404_is_not_retried(public_dns, monkeypatch: pytest.MonkeyPatch):
