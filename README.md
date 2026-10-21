@@ -6,7 +6,7 @@ The service fetches HTML with `httpx` (optional headless Playwright) and extract
 
 This is a **trusted single-instance / intranet sidecar**. Do not run multiple replicas (SQLite + in-process worker). Terminate TLS at a reverse proxy; the app speaks HTTP. Optional shared API keys are not OAuth and are not bound to a client.
 
-API contract version **0.10.0**.
+API contract version **0.10.1**.
 
 ## Caller contract
 
@@ -132,7 +132,7 @@ Default image stays **browser-free**:
 docker compose up --build -d
 ```
 
-Compose mounts `./data:/app/data` so `arachne.db`, sessions, and profiles survive container recreation. The default `ARACHNE_DATABASE_URL` is `sqlite+aiosqlite:///./data/arachne.db`.
+Compose mounts `./data:/app/data` so `arachne.db`, sessions, and profiles survive container recreation. The default `ARACHNE_DATABASE_URL` is `sqlite+aiosqlite:///./data/arachne.db`. An optional `./data/ca-bundle.pem` in that directory is extra trust for incomplete TLS chains (see above); it is not a Clash CA.
 
 Playwright image (Chromium + system deps). Compose profile `playwright` builds `Dockerfile.playwright` and does not start with a plain `docker compose up`:
 
@@ -411,11 +411,15 @@ Success (200):
 
 POST headers are allowlisted: `Authorization`, `Accept`, `Accept-Language`, `User-Agent`, `Referer`, `Cache-Control`. `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, and `Cookie` are stripped (`Cookie` only via the `cookies` field or session `cookies`). A caller or session `User-Agent` overrides `ARACHNE_USER_AGENT` and `ua_strategy=rotate`.
 
-Timeouts and connection errors are retried (`ARACHNE_MAX_RETRIES=2`, backoff 0.5s then 1s). 4xx and challenge pages are not retried. 2xx HTML or 401/403 bodies that match high-precision challenge markers (`cf-challenge`, `_cf_chl`, `just a moment`, `attention required`, …) are `challenge_detected` (403). Other 401/403 stay `unauthorized_upstream` (502).
+Timeouts and connection errors are retried (`ARACHNE_MAX_RETRIES=2`, backoff 0.5s then 1s). 4xx and challenge pages are not retried. TLS verification failures are `fetch_failed` with `detail.kind=ssl` and are not retried as connect errors. 2xx HTML or 401/403 bodies that match high-precision challenge markers (`cf-challenge`, `_cf_chl`, `just a moment`, `attention required`, …) are `challenge_detected` (403). Other 401/403 stay `unauthorized_upstream` (502).
 
 `ARACHNE_AUTO_RENDER` defaults to on. `ARACHNE_AUTO_RENDER_ON` is a CSV of `challenge` and/or `unauthorized` (default `challenge,unauthorized`). Unknown tokens are ignored. An explicit empty value selects no codes, so auto-render stays off even when `ARACHNE_AUTO_RENDER` is true. `challenge` means `challenge_detected`. `unauthorized` means `unauthorized_upstream` (401/403 that are not challenge pages). A request with `render: false` whose httpx result is one of those codes is fetched again with Playwright when Playwright imports, inside the same concurrency slot and the same QPS acquire. Success is cached with the render bit set and counted on the existing `auto_renders` stat (the JSON body has no new field). If Playwright is not installed, the original error is returned and is not rewritten to `render_unavailable`. `render: true` still uses the browser only and does not increment `auto_renders`. `extract_empty` is not auto-rendered. There is no site allowlist and no captcha solving; a particular site is not guaranteed to succeed. The same fetch path applies to `POST /profiles/suggest` (suggest does not write an auto session).
 
 `ARACHNE_HTTP_PROXY` (empty = off) is the only proxy setting. There is no proxy field on the request body, and `HTTP_PROXY` / `HTTPS_PROXY` are ignored. When set, httpx uses that proxy and does not pin the upstream IP; `assert_public_http_url` and the egress allowlist still run before the fetch. Playwright uses the same proxy. Userinfo in the proxy URL is redacted in logs. An invalid proxy URL fails the client with `fetch_failed`.
+
+Some origins omit intermediate certificates, so httpx fails with `CERTIFICATE_VERIFY_FAILED` / `unable to get local issuer certificate`. On that incomplete-chain error only, the httpx path tries AIA **once**: it reads the leaf with the same proxy, pin-IP, and SSRF checks (`CERT_NONE` is used only for that leaf capture, never for the page body), downloads the AIA URIs over httpx (5s connect/read, same proxy, public-URL check), and retries the page with a temporary client. That client's trust store is certifi, plus any certificates in `./data/ca-bundle.pem`, plus intermediates that chain to a root already in that store. The shared client is not switched over to the recovered context. If AIA fails, the original error is returned (`detail.kind=ssl`). Expired certificates and hostname mismatches are also `kind=ssl` and do not start AIA. Success JSON is unchanged; the log line includes the host and `aia_recovered=1`. `kind=ssl` is not an `ARACHNE_AUTO_RENDER_ON` code.
+
+`./data/ca-bundle.pem` is optional (one or more PEM certificates). A missing or empty file keeps today's certifi verification. An invalid file is logged and ignored. There is no `ARACHNE_CA_BUNDLE` setting. The file is read when the HTTP client is created; restart the process after you change it. This is incomplete-chain recovery, not a mode that trusts a proxy MITM CA such as Clash. Put a CA in that file only when you intend to trust it. Compose mounts `./data` and does not mount a Clash CA.
 
 Agent client timeout should cover the server read timeout (15s) plus `ARACHNE_QPS_WAIT_SECONDS` when mode is `queue`. **≥ 20s** is a reasonable default with `reject` or a short wait. Leave room for `ARACHNE_RENDER_TIMEOUT` when `render=true`, and for both the httpx read and the render timeout when auto-render may run.
 
@@ -570,7 +574,7 @@ How the new P2/P3 codes are verified without a real site or browser:
 | `llm_failed` | Mock LLM selectors that fail lxml self-test with `"strategy":"llm"` (`tests/test_profiles_suggest.py`) |
 | `job_not_found` | `GET` or cancel an unknown / expired job id (`tests/test_jobs.py`) |
 
-`tests/test_extract.py` covers content-area `images` (relative→absolute, tracker skip, dedupe/cap, empty list, `og.image` not merged). `tests/test_jobs.py` covers create / poll / cancel / per-item errors / QPS. `tests/test_jobs_persistence.py` covers SQLite reopen, URL search, delete, `X-Arachne-Client` isolation, and TTL cleanup. `tests/test_profiles_suggest.py` covers heuristic suggest, `llm_unavailable`, mocked LLM verify/fail, auto fallback, and that suggest does not write disk. `tests/test_profiles_write.py` covers 409 / overwrite / hot-reload after write and the `ARACHNE_PROFILES_WRITE` gate. `tests/test_auth.py`, `tests/test_ready.py`, `tests/test_egress.py`, and `tests/test_transport.py` cover P7a auth, readiness, allowlist, and pin-IP. `tests/test_qps_queue.py`, `tests/test_auto_render.py`, `tests/test_auto_session.py`, and `tests/test_proxy_client.py` cover queue / reject, auto-render (including `unauthorized_upstream`), Fernet `auto-<host>` reuse, and the proxy client branch (no live network).
+`tests/test_extract.py` covers content-area `images` (relative→absolute, tracker skip, dedupe/cap, empty list, `og.image` not merged). `tests/test_jobs.py` covers create / poll / cancel / per-item errors / QPS. `tests/test_jobs_persistence.py` covers SQLite reopen, URL search, delete, `X-Arachne-Client` isolation, and TTL cleanup. `tests/test_profiles_suggest.py` covers heuristic suggest, `llm_unavailable`, mocked LLM verify/fail, auto fallback, and that suggest does not write disk. `tests/test_profiles_write.py` covers 409 / overwrite / hot-reload after write and the `ARACHNE_PROFILES_WRITE` gate. `tests/test_auth.py`, `tests/test_ready.py`, `tests/test_egress.py`, and `tests/test_transport.py` cover P7a auth, readiness, allowlist, and pin-IP. `tests/test_qps_queue.py`, `tests/test_auto_render.py`, `tests/test_auto_session.py`, and `tests/test_proxy_client.py` cover queue / reject, auto-render (including `unauthorized_upstream`), Fernet `auto-<host>` reuse, and the proxy client branch (no live network). `tests/test_tls_aia.py` covers incomplete-chain classification, CA-bundle soft-fail, the AIA cache, the one-shot recovery, and `kind=ssl` (mocked; no live origin).
 
 `tests/test_jobs.py` covers create 202, per-item failure still `completed`, cancel, `job_not_found`, max URLs, and that creating a job does not burn QPS.
 

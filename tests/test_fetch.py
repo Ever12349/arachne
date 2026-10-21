@@ -76,7 +76,12 @@ async def test_timeout_mapped(public_dns):
 
 
 @pytest.mark.asyncio
-async def test_connect_error_is_fetch_failed(public_dns):
+async def test_connect_error_is_fetch_failed(public_dns, monkeypatch: pytest.MonkeyPatch):
+    async def forbid_aia(_url: str):
+        raise AssertionError("connect errors must not chase AIA")
+
+    monkeypatch.setattr("app.fetch.recover_verify_context", forbid_aia)
+
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("connection refused", request=request)
 
@@ -84,6 +89,7 @@ async def test_connect_error_is_fetch_failed(public_dns):
         with pytest.raises(ArachneError) as exc:
             await fetch_url(client, "https://example.com/")
     assert exc.value.code == "fetch_failed"
+    assert exc.value.detail["kind"] == "connect"
 
 
 @pytest.mark.asyncio

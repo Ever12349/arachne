@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import ssl
 import sys
 import types
 
@@ -12,6 +13,7 @@ import pytest
 from app.errors import ArachneError
 from app.fetch import create_http_client, ssrf_request_hook
 from app.proxy_util import playwright_proxy, redact_proxy_url
+from app.tls_aia import aia_timeout, peer_capture_ssl_context
 from app.transport import PinIPAsyncTransport
 
 
@@ -90,6 +92,61 @@ def test_playwright_proxy_splits_userinfo(monkeypatch: pytest.MonkeyPatch):
         "username": "alice",
         "password": "s3cret",
     }
+
+
+def _ssl_contexts(client: httpx.AsyncClient) -> list[ssl.SSLContext]:
+    found: list[ssl.SSLContext] = []
+    transports: list[object] = [client._transport, *client._mounts.values()]
+    for transport in transports:
+        if isinstance(transport, PinIPAsyncTransport):
+            transport = transport._transport
+        pool = getattr(transport, "_pool", None)
+        ctx = getattr(pool, "_ssl_context", None)
+        if isinstance(ctx, ssl.SSLContext):
+            found.append(ctx)
+    return found
+
+
+async def test_default_client_verifies(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("app.config.HTTP_PROXY", "")
+    client = create_http_client()
+    try:
+        contexts = _ssl_contexts(client)
+        assert contexts
+        assert all(ctx.verify_mode == ssl.CERT_REQUIRED for ctx in contexts)
+        assert ssrf_request_hook in client.event_hooks["request"]
+    finally:
+        await client.aclose()
+
+
+async def test_pin_client_uses_given_verify_context():
+    ctx = peer_capture_ssl_context()
+    client = create_http_client(ctx, timeout=aia_timeout())
+    try:
+        assert isinstance(client._transport, PinIPAsyncTransport)
+        contexts = _ssl_contexts(client)
+        assert contexts
+        assert all(item is ctx for item in contexts)
+        assert ctx.verify_mode == ssl.CERT_NONE
+        assert client.timeout.connect == 5.0
+        assert ssrf_request_hook in client.event_hooks["request"]
+    finally:
+        await client.aclose()
+
+
+async def test_proxy_client_uses_same_verify_context(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("app.config.HTTP_PROXY", "http://proxy.example:8080")
+    ctx = peer_capture_ssl_context()
+    client = create_http_client(ctx, timeout=aia_timeout())
+    try:
+        assert _proxy_host(client) == "proxy.example"
+        contexts = _ssl_contexts(client)
+        assert contexts
+        assert any(item is ctx for item in contexts)
+        assert all(item.verify_mode == ssl.CERT_NONE for item in contexts)
+        assert ssrf_request_hook in client.event_hooks["request"]
+    finally:
+        await client.aclose()
 
 
 def test_playwright_proxy_off_when_empty(monkeypatch: pytest.MonkeyPatch):

@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 from app.cache import ResultCache, cache_key
-from app.errors import ArachneError, render_unavailable
+from app.errors import ArachneError, fetch_failed, render_unavailable
 from app.fetch import FetchedPage
 from app.render import RenderedPage
 from app.limits import FixedWindowRateLimiter, Stats
@@ -401,3 +401,30 @@ def test_auto_render_on_csv(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setenv("ARACHNE_AUTO_RENDER_ON", "challenge_detected")
     assert auto_render_on_codes() == frozenset()
+
+    monkeypatch.setenv("ARACHNE_AUTO_RENDER_ON", "challenge,ssl,fetch_failed")
+    assert auto_render_on_codes() == frozenset({"challenge_detected"})
+
+
+async def test_ssl_fetch_failed_does_not_auto_render(monkeypatch: pytest.MonkeyPatch):
+    async def fake_fetch(*_args, **_kwargs) -> FetchedPage:
+        raise fetch_failed(
+            "Failed to fetch URL",
+            {"reason": "unable to get local issuer certificate", "kind": "ssl"},
+        )
+
+    async def fake_render(*_args, **_kwargs) -> RenderedPage:
+        raise AssertionError("ssl must not auto-render")
+
+    monkeypatch.setattr("app.service.fetch_with_retries", fake_fetch)
+    monkeypatch.setattr("app.service.render_url", fake_render)
+    monkeypatch.setattr("app.render.playwright_available", lambda: True)
+    monkeypatch.setattr("app.config.AUTO_RENDER", True)
+    monkeypatch.setattr("app.config.AUTO_RENDER_ON", _both_codes())
+    stats = Stats()
+    with pytest.raises(ArachneError) as exc:
+        await _extract(monkeypatch, stats, render=False)
+    assert exc.value.code == "fetch_failed"
+    assert exc.value.detail["kind"] == "ssl"
+    assert "fetch_failed" not in _both_codes()
+    assert stats.auto_renders == 0

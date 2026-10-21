@@ -6,6 +6,7 @@ lxml==6.1.3
 cssselect==1.3.0
 cachetools==5.5.2
 cryptography==45.0.7
+aia-chaser==3.4.1
 sqlalchemy==2.0.52
 aiosqlite==0.22.1
 prometheus-client==0.26.0

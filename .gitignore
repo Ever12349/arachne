@@ -19,3 +19,4 @@ data/profiles/*.json
 data/*.db
 data/*.db-wal
 data/*.db-shm
+data/ca-bundle.pem
