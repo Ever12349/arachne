@@ -19,7 +19,10 @@ def test_health(api_client: TestClient):
 
 def test_openapi_version(api_client: TestClient):
     spec = api_client.get("/openapi.json").json()
-    assert spec["info"]["version"] == "0.10.3"
+    assert spec["info"]["version"] == "0.11.0"
+    headers = spec["paths"]["/extract"]["get"]["responses"]["200"]["headers"]
+    assert "X-Arachne-Render" in headers
+    assert "X-Arachne-Render" in spec["paths"]["/extract"]["post"]["responses"]["200"]["headers"]
 
 
 def test_request_id_generated_and_echoed(api_client: TestClient):
@@ -75,6 +78,9 @@ def test_get_extract_success(api_client: TestClient):
     assert data["main_text"]
     assert data["truncated"] is False
     assert "cached" not in data
+    assert "auto_render" not in data
+    assert "render_used" not in data
+    assert "X-Arachne-Render" not in response.headers
     assert data["profile_id"] == ""
     assert data["profile_version"] == ""
     assert data["profile_fallback"] is False
@@ -95,6 +101,43 @@ def test_post_extract_success(api_client: TestClient):
     assert response.json()["title"]
 
 
+def test_extract_error_omits_render_header(api_client: TestClient):
+    response = api_client.get("/extract", params={"url": "http://127.0.0.1/"})
+    assert response.status_code == 400
+    assert "X-Arachne-Render" not in response.headers
+
+
+def test_extract_sets_render_header_when_playwright_used(
+    api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    from app.models import ExtractResponse, PageMetadata
+    from app.service import ExtractResult
+
+    async def fake_run_extract(**_kwargs):
+        return ExtractResult(
+            response=ExtractResponse(
+                url="https://example.com/article",
+                requested_url="https://example.com/article",
+                status_code=200,
+                title="Rendered",
+                main_text="body",
+                metadata=PageMetadata(),
+                links=[],
+                truncated=False,
+            ),
+            render_used=True,
+        )
+
+    monkeypatch.setattr("app.main.run_extract", fake_run_extract)
+    response = api_client.post("/extract", json={"url": "https://example.com/article"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["title"] == "Rendered"
+    assert "cached" not in data
+    assert "render_used" not in data
+    assert response.headers.get("X-Arachne-Render") == "1"
+
+
 @pytest.mark.parametrize(
     "url",
     ["http://127.0.0.1/", "file:///etc/passwd", "ftp://example.com/", "not-a-url"],
@@ -105,6 +148,7 @@ def test_bad_url(api_client: TestClient, url: str):
     body = response.json()
     assert body["error"]["code"] == "bad_url"
     assert "message" in body["error"]
+    assert "X-Arachne-Render" not in response.headers
     assert isinstance(body["error"]["detail"], dict)
 
 

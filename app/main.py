@@ -29,7 +29,7 @@ from app.metrics import METRICS_CONTENT_TYPE, render_metrics
 from app.models import ErrorResponse, ExtractRequest, ExtractResponse, StatsResponse
 from app.profiles.loader import ProfileRegistry
 from app.profiles.router import router as profiles_router
-from app.service import run_extract
+from app.service import ExtractResult, run_extract
 
 setup_logging()
 logger = logging.getLogger("arachne")
@@ -47,6 +47,23 @@ ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
     502: {"model": ErrorResponse, "description": "fetch_failed | unauthorized_upstream | render_failed | llm_failed"},
     503: {"model": ErrorResponse, "description": "not_ready"},
     504: {"model": ErrorResponse, "description": "timeout"},
+}
+
+RENDER_HEADER = "X-Arachne-Render"
+EXTRACT_RESPONSES: dict[int | str, dict[str, object]] = {
+    200: {
+        "model": ExtractResponse,
+        "headers": {
+            RENDER_HEADER: {
+                "description": (
+                    "Set to 1 when the body came from Playwright, including a cache "
+                    "hit of a rendered page. Omitted for httpx successes and for errors."
+                ),
+                "schema": {"type": "string", "enum": ["1"]},
+            }
+        },
+    },
+    **ERROR_RESPONSES,
 }
 
 
@@ -91,7 +108,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="arachne",
-    version="0.10.3",
+    version="0.11.0",
     description=(
         "AI-agent service: URL → structured page JSON. Primary API is POST /extract; "
         "jobs reuse the same fetch. There is no /browse endpoint. "
@@ -196,6 +213,11 @@ async def metrics() -> Response:
     return Response(content=render_metrics(), media_type=METRICS_CONTENT_TYPE)
 
 
+def _apply_render_header(response: Response, render_used: bool) -> None:
+    if render_used:
+        response.headers[RENDER_HEADER] = "1"
+
+
 async def _run_extract(
     request: Request,
     url: str,
@@ -208,7 +230,7 @@ async def _run_extract(
     ua_strategy: str = "default",
     render: bool = False,
     site_profile: str | None = None,
-) -> ExtractResponse:
+) -> ExtractResult:
     state = request.app.state
     return await run_extract(
         url=url,
@@ -228,9 +250,10 @@ async def _run_extract(
     )
 
 
-@app.get("/extract", response_model=ExtractResponse, responses=ERROR_RESPONSES)
+@app.get("/extract", response_model=ExtractResponse, responses=EXTRACT_RESPONSES)
 async def extract_get(
     request: Request,
+    response: Response,
     url: str = Query(..., description="http(s) page URL to fetch and extract"),
     max_chars: int | None = Query(
         default=None,
@@ -238,13 +261,15 @@ async def extract_get(
     ),
     client: httpx.AsyncClient = Depends(get_http_client),
 ) -> ExtractResponse:
-    return await _run_extract(request, url, client, max_chars=max_chars)
+    result = await _run_extract(request, url, client, max_chars=max_chars)
+    _apply_render_header(response, result.render_used)
+    return result.response
 
 
 @app.post(
     "/extract",
     response_model=ExtractResponse,
-    responses=ERROR_RESPONSES,
+    responses=EXTRACT_RESPONSES,
     summary="Extract one URL into a structured page",
     description=(
         "Primary caller API. render omitted or false: httpx, then at most one "
@@ -255,9 +280,10 @@ async def extract_get(
 async def extract_post(
     request: Request,
     body: ExtractRequest,
+    response: Response,
     client: httpx.AsyncClient = Depends(get_http_client),
 ) -> ExtractResponse:
-    return await _run_extract(
+    result = await _run_extract(
         request,
         body.url,
         client,
@@ -269,6 +295,8 @@ async def extract_post(
         render=body.render,
         site_profile=body.site_profile,
     )
+    _apply_render_header(response, result.render_used)
+    return result.response
 
 
 app.include_router(jobs_router)

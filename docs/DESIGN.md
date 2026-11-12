@@ -1,8 +1,8 @@
 # arachne 设计文档
 
-> 版本：v0.10.1 · 受众：维护者与调用方（AI Agent 系统）  
+> 版本：v0.11.0 · 受众：维护者与调用方（AI Agent 系统）  
 > 仓库：https://github.com/Ever12349/arachne  
-> 状态：0.10.1 在 httpx `/extract` 路径上对不完整 TLS 链做一次 AIA 补齐，并可选加载 `./data/ca-bundle.pem`。不关闭校验，不默认信任代理 MITM CA。P10′ 调用方文档契约仍有效。P9′ 已落地（调用方仍只 POST `url`；`challenge_detected` / `unauthorized_upstream` 可各回退一次 Playwright，并把浏览器 Cookie 写成 Fernet `auto-<host>`）。P8′（QPS 排队、`ARACHNE_HTTP_PROXY`、挑战页自动 Playwright）仍有效。单实例 / 内网 sidecar。P7a（可选 API key、`/ready`、httpx pin-IP、egress allowlist、JSON 日志、Prometheus `/metrics`）与 0.8.1 正文区域 `images` 仍有效。P6 半自动 profiles 与 P5 SQLite jobs 仍有效。Worker 仍为进程内 asyncio。**不要**多副本（无 Postgres/Redis）。TLS 终止在反向代理，应用本身只讲 HTTP。默认镜像仍不含浏览器（Compose profile `playwright` 才构建 `Dockerfile.playwright`）。无 OAuth / webhook / 密钥绑定客户端。会话仍为 Fernet 文件。可选 OpenAI 兼容 LLM（`ARACHNE_LLM_*`）仅用于 suggest。复用自动会话需要配置 `ARACHNE_SESSION_KEY`。有状态浏览器会话推迟；外部浏览器池不计划。
+> 状态：0.11.0 在 `render: false` 缓存未命中时回退同一指纹的 `render: true` 条目；HTTP `GET`/`POST /extract` 在正文来自 Playwright（含这类缓存命中）时设置 `X-Arachne-Render: 1`，成功 JSON 不新增字段。0.10.1 在 httpx `/extract` 路径上对不完整 TLS 链做一次 AIA 补齐，并可选加载 `./data/ca-bundle.pem`。不关闭校验，不默认信任代理 MITM CA。P10′ 调用方文档契约仍有效。P9′ 已落地（调用方仍只 POST `url`；`challenge_detected` / `unauthorized_upstream` 可各回退一次 Playwright，并把浏览器 Cookie 写成 Fernet `auto-<host>`）。P8′（QPS 排队、`ARACHNE_HTTP_PROXY`、挑战页自动 Playwright）仍有效。单实例 / 内网 sidecar。P7a（可选 API key、`/ready`、httpx pin-IP、egress allowlist、JSON 日志、Prometheus `/metrics`）与 0.8.1 正文区域 `images` 仍有效。P6 半自动 profiles 与 P5 SQLite jobs 仍有效。Worker 仍为进程内 asyncio。**不要**多副本（无 Postgres/Redis）。TLS 终止在反向代理，应用本身只讲 HTTP。默认镜像仍不含浏览器（Compose profile `playwright` 才构建 `Dockerfile.playwright`）。无 OAuth / webhook / 密钥绑定客户端。会话仍为 Fernet 文件。可选 OpenAI 兼容 LLM（`ARACHNE_LLM_*`）仅用于 suggest。复用自动会话需要配置 `ARACHNE_SESSION_KEY`。有状态浏览器会话推迟；外部浏览器池不计划。
 
 ## 1. 定位
 
@@ -45,7 +45,7 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 
 ## 3. API 契约（面向 Agent）
 
-契约版本 **0.10.1**。响应 JSON 不新增字段。不完整 TLS 链在 httpx 路径上最多补齐一次；成功体不变。
+契约版本 **0.11.0**。响应 JSON 不新增字段。`GET`/`POST /extract` 在正文来自 Playwright 时设置 `X-Arachne-Render: 1`（httpx 成功与错误响应省略该头）。不完整 TLS 链在 httpx 路径上最多补齐一次；成功体不变。
 
 ### 3.0 调用方契约（P10′，仅文档）
 
@@ -105,7 +105,7 @@ POST `/extract` JSON：
 
 ### 3.2 成功响应
 
-`links` 与 `images` 使用对象列表。`url` 为重定向后的最终地址；`requested_url` 为调用方原始 URL。metadata 字符串字段缺省为 `""`。`truncated` 默认 `false`：仅在 `main_text` 因 `max_chars` 或硬上限被截断时为 `true`。成功体 **没有** `cached` 字段；命中只计入日志与 `/stats`。
+`links` 与 `images` 使用对象列表。`url` 为重定向后的最终地址；`requested_url` 为调用方原始 URL。metadata 字符串字段缺省为 `""`。`truncated` 默认 `false`：仅在 `main_text` 因 `max_chars` 或硬上限被截断时为 `true`。成功体 **没有** `cached`、`auto_render`、`render_used` 字段；命中只计入日志与 `/stats`。HTTP `GET`/`POST /extract` 在正文来自 Playwright（本请求自动渲染、显式 `render: true`，或命中这类缓存）时设置 `X-Arachne-Render: 1`；httpx 成功与错误响应不带该头。Job 存档与 `GET /jobs/{id}` 不记录该标志。
 
 `profile_id` / `profile_version` 在未选中 profile 时为 `""`。`profile_fallback` 仅在**已选中** profile、但 title/main 选择器未抽到内容、因而回退 trafilatura/generic 时为 `true`；无 profile 或 profile 选择器成功时为 `false`。
 
@@ -260,7 +260,7 @@ python scripts/write_session.py --id demo \
 - 需要会话、UA 策略、`render` 或 `site_profile` 时必须 `POST /extract`；GET 只有 `url` + 可选 `max_chars`
 - 设置客户端超时略大于服务端读超时 / 渲染超时（建议服务端 15s，Agent 侧 ≥ 20s；`render=true` 时按 `ARACHNE_RENDER_TIMEOUT` 再留余量）
 - 把 `main_text` 当作模型上下文的主输入；用 `max_chars` 控制 prompt 体积
-- 同一规范化 URL + 合并后会话指纹 + `render` + `ua_strategy` + `profile_id@version` 在 TTL 内命中进程内缓存（响应体仍无 `cached` 字段）
+- 同一规范化 URL + 合并后会话指纹 + `render` + `ua_strategy` + `profile_id@version` 在 TTL 内命中进程内缓存（响应体仍无 `cached` 字段）。`render: false` 先查自身键，未命中再查同一指纹的 `render: true` 键；`render: true` 不回退到 `render: false`。`ARACHNE_AUTO_RENDER` 关闭只表示此刻不启动浏览器，已缓存的渲染正文仍可复用
 - 全局限流：固定 1 秒窗口 QPS=5。`ARACHNE_QPS_MODE=queue`（默认）在窗口满时睡到下一窗口边界，最长 `ARACHNE_QPS_WAIT_SECONDS`（默认 30）；超时仍 `rate_limited` / 429。`reject` 为立即 429。非法 mode 视为 `queue`。`wait<=0` 不等待。每次 `run_extract` / `run_suggest` 只 acquire 一次
 - 遇到 `challenge_detected` 或（默认）`unauthorized_upstream`：`ARACHNE_AUTO_RENDER=true` 且该错误码在 `ARACHNE_AUTO_RENDER_ON` 中、请求 `render=false`、本机能 import Playwright 时，服务端在同一次 semaphore 持有内再渲染一次（不占第二个 QPS 名额）。未安装 Playwright 则原样返回该错误，不改成 `render_unavailable`。显式 `render=true` 只走浏览器。调用方仍可换 Cookie、`ua_strategy=rotate`，或依赖已写入的 `auto-<host>`。不要指望服务端解验证码。`extract_empty` 不自动渲染。不保证任一具体站点成功
 - 遇到 `session_invalid`：检查 id、密钥、会话文件；不要把密钥放进 prompt
@@ -646,7 +646,7 @@ profiles/
 
 ### 4.6 可观测性
 
-抽取日志字段：`latency_ms`、`error_code`、`cache`（hit/miss）、`session`（指纹前缀）、`profile`（`id@version` 或 `-`）、`url`、`request_id`、`qps_wait_ms`、`auto_render`（`0` 或 `1`）。Suggest 另记 `strategy`，并带同样的 `qps_wait_ms` / `auto_render`。Job worker 另记 `job_id` / `total` / 终态。禁止记录 Cookie / Authorization / cookies / 会话明文 / LLM API key / `X-Arachne-Key` / 代理 URL 的 userinfo。重试只记录 `attempt` / `delay_s` / `error_code`。代理启用时日志写打码后的 `proxy=`。默认文本 formatter；`ARACHNE_LOG_JSON=1` 时每行一个 JSON 对象。`GET /metrics` 与 `/stats` 双写。
+抽取日志字段：`latency_ms`、`error_code`、`cache`（hit/miss）、`session`（指纹前缀）、`profile`（`id@version` 或 `-`）、`url`、`request_id`、`qps_wait_ms`、`auto_render`（`0` 或 `1`，仅本请求是否启动了 Playwright）、`render_used`（`0` 或 `1`，正文是否来自 Playwright，含缓存命中）。Suggest 另记 `strategy`，并带同样的 `qps_wait_ms` / `auto_render`。Job worker 另记 `job_id` / `total` / 终态。禁止记录 Cookie / Authorization / cookies / 会话明文 / LLM API key / `X-Arachne-Key` / 代理 URL 的 userinfo。重试只记录 `attempt` / `delay_s` / `error_code`。代理启用时日志写打码后的 `proxy=`。默认文本 formatter；`ARACHNE_LOG_JSON=1` 时每行一个 JSON 对象。`GET /metrics` 与 `/stats` 双写。
 
 ## 5. 实现分期（开发计划）
 
@@ -780,6 +780,10 @@ httpx 拉取遇到缺中间证书时补齐一次。响应契约不新增字段�
 - [x] 依赖钉 `aia-chaser==3.4.1`（tenacity 作为传递依赖即可）
 - [x] **不做**：`ARACHNE_CA_BUNDLE`、YAML、AIA 开关、成功 JSON 新字段、把校验关掉去“总是信任 Clash”
 
+### 0.11.0 — 自动渲染缓存回退（已实现）
+
+`render: false` 在自身缓存键未命中时，读取同一指纹的 `render: true` 条目。写路径不变：自动渲染与显式 `render: true` 只写入 `render=true` 键；httpx 成功只写入 `render=false` 键。不把结果再写到 `auto-<host>` 持久化后的指纹下。TTL 仍是 `ARACHNE_CACHE_TTL_SECONDS`（默认 60），无新配置项。成功 JSON 不新增字段。HTTP `GET`/`POST /extract` 在正文来自 Playwright（含这类缓存命中）时设置 `X-Arachne-Render: 1`；httpx 成功与错误响应省略该头。Job 存档与 `GET /jobs/{id}` 不加字段、不加该头。`/profiles/suggest` 不走 extract 缓存，也不加该头。
+
 ## 6. 路线图总览
 
 ```mermaid
@@ -818,6 +822,7 @@ flowchart LR
 
 ## 7. 与当前仓库状态
 
+- 0.11.0：`render: false` 可回退同一指纹的渲染缓存；`X-Arachne-Render: 1` 标示 Playwright 正文（含缓存命中）；成功 JSON 不新增字段
 - 0.10.1：httpx 不完整 TLS 链最多 AIA 一次（`kind=ssl` 不重试、不自动渲染）；可选 `./data/ca-bundle.pem`。响应契约不新增字段。不默认信任代理 MITM CA
 - 0.10.0：`ARACHNE_AUTO_RENDER_ON`（含 `unauthorized_upstream`）、Fernet `auto-<host>` 读写；响应契约不新增字段；复用需要 `ARACHNE_SESSION_KEY`。P10′ 把同一行为写成调用方契约（§3.0）：无 `/browse`，验证码/登录墙要人，有状态浏览器会话推迟，外部浏览器池不计划
 - 0.9.0：QPS `queue`、`ARACHNE_HTTP_PROXY`、`challenge_detected` 自动 Playwright；响应契约不新增字段
@@ -831,7 +836,7 @@ flowchart LR
 
 ## 8. 验收（P7a）
 
-1. `uvicorn app.main:app` 可在**未安装 Playwright**、**未配置 LLM key**、**REQUIRE_AUTH=false** 时启动；OpenAPI version `0.10.1`  
+1. `uvicorn app.main:app` 可在**未安装 Playwright**、**未配置 LLM key**、**REQUIRE_AUTH=false** 时启动；OpenAPI version `0.11.0`  
 2. `ARACHNE_REQUIRE_AUTH=true` 且 `ARACHNE_API_KEYS` 为空 → lifespan 拒绝启动  
 3. 鉴权开：无 key / 错 key → `unauthorized`（401）；Bearer 或 `X-Arachne-Key` 均可；`/health` 与 `/ready` 免鉴权；`/metrics`、`/stats` 受 `*_PUBLIC` 控制  
 4. `POST /profiles` 在 `ARACHNE_PROFILES_WRITE` 未开时 → `forbidden`（403），即使鉴权关闭  

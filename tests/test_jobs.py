@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.models import ExtractResponse, PageMetadata
+from app.service import ExtractResult
 
 
 def _poll_job(client: TestClient, job_id: str, *, timeout: float = 5.0, headers: dict | None = None) -> dict:
@@ -99,7 +100,7 @@ def test_cancel_pending_running_finishes(api_client: TestClient, monkeypatch: py
         await loop.run_in_executor(None, lambda: release.wait(timeout=5))
         result = _dummy_extract()
         result.requested_url = kwargs["url"]
-        return result
+        return ExtractResult(response=result)
 
     monkeypatch.setattr("app.config.JOB_CONCURRENCY", 1)
     monkeypatch.setattr("app.jobs.worker.run_extract", gated_extract)

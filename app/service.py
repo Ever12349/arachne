@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 
 import httpx
 
@@ -26,6 +27,7 @@ from app.fetch import FetchedPage, is_html_content_type
 from app.headers_policy import filter_request_headers
 from app.limits import FixedWindowRateLimiter, Stats
 from app.models import ExtractResponse
+
 from app.profiles.apply import extract_with_profile
 from app.profiles.loader import ProfileRegistry, resolve_profile
 from app.profiles.models import SuggestResponse, SuggestStrategy
@@ -33,6 +35,15 @@ from app.profiles.suggest import suggest_from_html
 from app.proxy_util import redact_url_userinfo
 from app.render import render_url
 from app.ssrf import parse_http_url
+
+
+@dataclass(frozen=True)
+class ExtractResult:
+    """Success body plus whether it came from Playwright (for the HTTP header)."""
+
+    response: ExtractResponse
+    render_used: bool = False
+
 
 logger = logging.getLogger("arachne")
 
@@ -166,11 +177,12 @@ def _log_extract(
     qps_wait_ms: float,
     auto_render: int,
     session_persist: str,
+    render_used: bool,
 ) -> None:
     # Structured fields only: never log Cookie / Authorization / cookies / session plaintext / proxy userinfo.
     logger.info(
         "extract url=%s cache=%s latency_ms=%.2f error_code=%s session=%s profile=%s "
-        "qps_wait_ms=%.2f auto_render=%s session_persist=%s",
+        "qps_wait_ms=%.2f auto_render=%s session_persist=%s render_used=%s",
         redact_url_userinfo(url),
         cache_status or "-",
         latency_ms,
@@ -180,6 +192,7 @@ def _log_extract(
         qps_wait_ms,
         1 if auto_render else 0,
         session_persist,
+        1 if render_used else 0,
     )
 
 
@@ -210,7 +223,7 @@ async def run_extract(
     limiter: FixedWindowRateLimiter,
     semaphore: asyncio.Semaphore,
     stats: Stats,
-) -> ExtractResponse:
+) -> ExtractResult:
     """QPS → cache lookup → (miss) semaphore → fetch or render / extract → store → max_chars."""
     t0 = time.perf_counter()
     stats.record_request()
@@ -223,6 +236,7 @@ async def run_extract(
     qps_wait_ms = 0.0
     auto_render = 0
     session_persist = "0"
+    render_used = False
 
     def finish_log() -> None:
         latency_ms = (time.perf_counter() - t0) * 1000.0
@@ -237,6 +251,7 @@ async def run_extract(
             qps_wait_ms=qps_wait_ms,
             auto_render=auto_render,
             session_persist=session_persist,
+            render_used=render_used,
         )
 
     try:
@@ -270,11 +285,27 @@ async def run_extract(
             profile_id=lookup_id,
             profile_version=lookup_version,
         )
-        cached = await cache.get(key)
-        if cached is not None:
+        entry = await cache.get_entry(key)
+        if entry is None and not render:
+            entry = await cache.get_entry(
+                cache_key(
+                    requested,
+                    safe_headers,
+                    safe_cookies,
+                    render=True,
+                    ua_strategy=strategy,
+                    profile_id=lookup_id,
+                    profile_version=lookup_version,
+                )
+            )
+        if entry is not None:
             cache_status = "hit"
             stats.record_cache_hit()
-            return apply_max_chars(cached, max_chars)
+            render_used = entry.render_used
+            return ExtractResult(
+                response=apply_max_chars(entry.response, max_chars),
+                render_used=render_used,
+            )
 
         cache_status = "miss"
         stats.record_cache_miss()
@@ -300,6 +331,7 @@ async def run_extract(
                 site_profile=explicit,
                 profiles=profiles,
             )
+        render_used = bool(auto_render or render)
         if auto_render:
             key = cache_key(
                 requested,
@@ -310,8 +342,11 @@ async def run_extract(
                 profile_id=lookup_id,
                 profile_version=lookup_version,
             )
-        await cache.set(key, result)
-        return apply_max_chars(result, max_chars)
+        await cache.set(key, result, render_used=render_used)
+        return ExtractResult(
+            response=apply_max_chars(result, max_chars),
+            render_used=render_used,
+        )
     except ArachneError as exc:
         error_code = exc.code
         stats.record_error(exc.code)
