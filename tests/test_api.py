@@ -19,7 +19,7 @@ def test_health(api_client: TestClient):
 
 def test_openapi_version(api_client: TestClient):
     spec = api_client.get("/openapi.json").json()
-    assert spec["info"]["version"] == "0.11.0"
+    assert spec["info"]["version"] == "0.11.1"
     headers = spec["paths"]["/extract"]["get"]["responses"]["200"]["headers"]
     assert "X-Arachne-Render" in headers
     assert "X-Arachne-Render" in spec["paths"]["/extract"]["post"]["responses"]["200"]["headers"]

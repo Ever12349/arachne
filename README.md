@@ -6,7 +6,7 @@ The service fetches HTML with `httpx` (optional headless Playwright) and extract
 
 This is a **trusted single-instance / intranet sidecar**. Do not run multiple replicas (SQLite + in-process worker). Terminate TLS at a reverse proxy; the app speaks HTTP. Optional shared API keys are not OAuth and are not bound to a client.
 
-API contract version **0.11.0**.
+API contract version **0.11.1**.
 
 ## Caller contract
 
@@ -425,7 +425,7 @@ Some origins omit intermediate certificates, so httpx fails with `CERTIFICATE_VE
 
 Agent client timeout should cover the server read timeout (15s) plus `ARACHNE_QPS_WAIT_SECONDS` when mode is `queue`. **≥ 20s** is a reasonable default with `reject` or a short wait. Leave room for `ARACHNE_RENDER_TIMEOUT` when `render=true`, and for both the httpx read and the render timeout when auto-render may run.
 
-Global extract QPS is a fixed 1-second window of 5 (override with `ARACHNE_QPS`). `ARACHNE_QPS_MODE` defaults to `queue`: a full window sleeps until the next boundary, up to `ARACHNE_QPS_WAIT_SECONDS` (default 30). Past that budget the response is still `rate_limited` (429). `reject` returns 429 immediately. An unrecognized mode is treated as `queue`. `ARACHNE_QPS_WAIT_SECONDS <= 0` does not sleep. Each `run_extract` / `run_suggest` acquires one slot; auto-render does not take a second one. Cache misses (including Playwright) are also limited by `ARACHNE_MAX_CONCURRENCY` (default 10). `/health`, `/ready`, `/stats`, `/metrics`, **creating** a job (`POST /jobs`), and `POST /profiles` (write) are exempt. `POST /profiles/suggest` **does** consume QPS and the extract semaphore. Each job item still goes through `run_extract` and therefore the limiter.
+Global extract QPS is a fixed 1-second window of 5 (override with `ARACHNE_QPS`). `ARACHNE_QPS_MODE` defaults to `queue`: a full window sleeps until the next boundary, up to `ARACHNE_QPS_WAIT_SECONDS` (default 30). Past that budget the response is still `rate_limited` (429). `reject` returns 429 immediately. An unrecognized mode is treated as `queue`. `ARACHNE_QPS_WAIT_SECONDS <= 0` does not sleep. Each `run_extract` / `run_suggest` acquires one slot; auto-render does not take a second one. Cache misses (including Playwright) are also limited by `ARACHNE_MAX_CONCURRENCY` (default 10). The semaphore is released after fetch/render, before extract CPU. Sync extract, profile suggest HTML work, and session-file fsync run on a dedicated 4-thread pool (no extra env var); the LLM HTTP call in suggest stays on the event loop. `/health`, `/ready`, `/stats`, `/metrics`, **creating** a job (`POST /jobs`), and `POST /profiles` (write) are exempt. `POST /profiles/suggest` **does** consume QPS and the extract semaphore. Each job item still goes through `run_extract` and therefore the limiter.
 
 ## Batch jobs
 
