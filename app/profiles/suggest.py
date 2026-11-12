@@ -19,6 +19,7 @@ from app.profiles.apply import _css_all, _css_first, apply_remove_selectors
 from app.profiles.models import SelectorVariant, SuggestEvidence, SuggestResponse, SuggestStrategy
 from app.profiles.schema import PROFILE_ID_RE, SiteProfile
 from app.ssrf import normalize_host
+from app.threads import run_in_cpu_pool
 
 logger = logging.getLogger("arachne")
 
@@ -648,7 +649,7 @@ def selector_set_from_payload(html: str, payload: dict[str, object], *, url: str
 
 async def suggest_from_html(html: str, *, url: str, strategy: SuggestStrategy = "heuristic") -> SuggestResponse:
     """Build one primary profile plus optional alternatives. Does not write disk."""
-    heuristic_sets = suggest_heuristic(html, url=url)
+    heuristic_sets = await run_in_cpu_pool(suggest_heuristic, html, url=url)
     primary = heuristic_sets[0] if heuristic_sets else None
     alternatives = heuristic_sets[1:]
 
@@ -670,14 +671,14 @@ async def suggest_from_html(html: str, *, url: str, strategy: SuggestStrategy = 
             llm_skipped="no_key",
         )
 
-    skeleton = dom_skeleton(html)
+    skeleton = await run_in_cpu_pool(dom_skeleton, html)
     try:
         payload = await profile_llm.propose_selectors(
             url=url,
             skeleton=skeleton,
             draft=_draft_payload(primary),
         )
-        verified = selector_set_from_payload(html, payload, url=url)
+        verified = await run_in_cpu_pool(selector_set_from_payload, html, payload, url=url)
         if verified is None:
             raise llm_failed("LLM selectors failed lxml verification")
         other = [item for item in heuristic_sets if (item.title_selector, item.main_selector) != (verified.title_selector, verified.main_selector)]

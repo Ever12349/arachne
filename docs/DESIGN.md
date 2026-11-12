@@ -1,8 +1,8 @@
 # arachne 设计文档
 
-> 版本：v0.11.0 · 受众：维护者与调用方（AI Agent 系统）  
+> 版本：v0.11.1 · 受众：维护者与调用方（AI Agent 系统）  
 > 仓库：https://github.com/Ever12349/arachne  
-> 状态：0.11.0 在 `render: false` 缓存未命中时回退同一指纹的 `render: true` 条目；HTTP `GET`/`POST /extract` 在正文来自 Playwright（含这类缓存命中）时设置 `X-Arachne-Render: 1`，成功 JSON 不新增字段。0.10.1 在 httpx `/extract` 路径上对不完整 TLS 链做一次 AIA 补齐，并可选加载 `./data/ca-bundle.pem`。不关闭校验，不默认信任代理 MITM CA。P10′ 调用方文档契约仍有效。P9′ 已落地（调用方仍只 POST `url`；`challenge_detected` / `unauthorized_upstream` 可各回退一次 Playwright，并把浏览器 Cookie 写成 Fernet `auto-<host>`）。P8′（QPS 排队、`ARACHNE_HTTP_PROXY`、挑战页自动 Playwright）仍有效。单实例 / 内网 sidecar。P7a（可选 API key、`/ready`、httpx pin-IP、egress allowlist、JSON 日志、Prometheus `/metrics`）与 0.8.1 正文区域 `images` 仍有效。P6 半自动 profiles 与 P5 SQLite jobs 仍有效。Worker 仍为进程内 asyncio。**不要**多副本（无 Postgres/Redis）。TLS 终止在反向代理，应用本身只讲 HTTP。默认镜像仍不含浏览器（Compose profile `playwright` 才构建 `Dockerfile.playwright`）。无 OAuth / webhook / 密钥绑定客户端。会话仍为 Fernet 文件。可选 OpenAI 兼容 LLM（`ARACHNE_LLM_*`）仅用于 suggest。复用自动会话需要配置 `ARACHNE_SESSION_KEY`。有状态浏览器会话推迟；外部浏览器池不计划。
+> 状态：0.11.1 把 extract / suggest 的同步 CPU 与会话文件 fsync 放到 4 线程池，并在 fetch/render 之后释放抽取并发槽。0.11.0 在 `render: false` 缓存未命中时回退同一指纹的 `render: true` 条目；HTTP `GET`/`POST /extract` 在正文来自 Playwright（含这类缓存命中）时设置 `X-Arachne-Render: 1`，成功 JSON 不新增字段。0.10.1 在 httpx `/extract` 路径上对不完整 TLS 链做一次 AIA 补齐，并可选加载 `./data/ca-bundle.pem`。不关闭校验，不默认信任代理 MITM CA。P10′ 调用方文档契约仍有效。P9′ 已落地（调用方仍只 POST `url`；`challenge_detected` / `unauthorized_upstream` 可各回退一次 Playwright，并把浏览器 Cookie 写成 Fernet `auto-<host>`）。P8′（QPS 排队、`ARACHNE_HTTP_PROXY`、挑战页自动 Playwright）仍有效。单实例 / 内网 sidecar。P7a（可选 API key、`/ready`、httpx pin-IP、egress allowlist、JSON 日志、Prometheus `/metrics`）与 0.8.1 正文区域 `images` 仍有效。P6 半自动 profiles 与 P5 SQLite jobs 仍有效。Worker 仍为进程内 asyncio。**不要**多副本（无 Postgres/Redis）。TLS 终止在反向代理，应用本身只讲 HTTP。默认镜像仍不含浏览器（Compose profile `playwright` 才构建 `Dockerfile.playwright`）。无 OAuth / webhook / 密钥绑定客户端。会话仍为 Fernet 文件。可选 OpenAI 兼容 LLM（`ARACHNE_LLM_*`）仅用于 suggest。复用自动会话需要配置 `ARACHNE_SESSION_KEY`。有状态浏览器会话推迟；外部浏览器池不计划。
 
 ## 1. 定位
 
@@ -45,7 +45,7 @@ arachne 是一个 **Python HTTP 爬虫/抽取服务**：接收 URL（及后续�
 
 ## 3. API 契约（面向 Agent）
 
-契约版本 **0.11.0**。响应 JSON 不新增字段。`GET`/`POST /extract` 在正文来自 Playwright 时设置 `X-Arachne-Render: 1`（httpx 成功与错误响应省略该头）。不完整 TLS 链在 httpx 路径上最多补齐一次；成功体不变。
+契约版本 **0.11.1**。响应 JSON 不新增字段。`GET`/`POST /extract` 在正文来自 Playwright 时设置 `X-Arachne-Render: 1`（httpx 成功与错误响应省略该头）。不完整 TLS 链在 httpx 路径上最多补齐一次；成功体不变。
 
 ### 3.0 调用方契约（P10′，仅文档）
 
@@ -784,6 +784,10 @@ httpx 拉取遇到缺中间证书时补齐一次。响应契约不新增字段�
 
 `render: false` 在自身缓存键未命中时，读取同一指纹的 `render: true` 条目。写路径不变：自动渲染与显式 `render: true` 只写入 `render=true` 键；httpx 成功只写入 `render=false` 键。不把结果再写到 `auto-<host>` 持久化后的指纹下。TTL 仍是 `ARACHNE_CACHE_TTL_SECONDS`（默认 60），无新配置项。成功 JSON 不新增字段。HTTP `GET`/`POST /extract` 在正文来自 Playwright（含这类缓存命中）时设置 `X-Arachne-Render: 1`；httpx 成功与错误响应省略该头。Job 存档与 `GET /jobs/{id}` 不加字段、不加该头。`/profiles/suggest` 不走 extract 缓存，也不加该头。
 
+### 0.11.1 — 抽取 CPU 离开事件循环（已实现）
+
+`ARACHNE_MAX_CONCURRENCY` 信号量只包住 fetch/render；persist（含 `fsync`）与 `_extract_response` 在释放之后、仍按「先 persist 再 extract」的顺序执行。独立 4 线程池（无新环境变量），通过复制 `contextvars` 的 `run_in_executor` 提交，以便 `X-Request-Id` 进到工作线程。`extract_page` 的 CPU 走同一池。suggest 只把 `suggest_heuristic`、`dom_skeleton`、以及 LLM 返回后的 `selector_set_from_payload` 校验放进池；LLM 的 `await` 留在事件循环。池内抛出的 `ArachneError`（如 `extract_empty`）原样向上传，不改写成 `internal`。
+
 ## 6. 路线图总览
 
 ```mermaid
@@ -822,6 +826,7 @@ flowchart LR
 
 ## 7. 与当前仓库状态
 
+- 0.11.1：extract/suggest 同步 CPU 与会话 fsync 走 4 线程池；并发槽在 fetch/render 后释放；响应契约不新增字段
 - 0.11.0：`render: false` 可回退同一指纹的渲染缓存；`X-Arachne-Render: 1` 标示 Playwright 正文（含缓存命中）；成功 JSON 不新增字段
 - 0.10.1：httpx 不完整 TLS 链最多 AIA 一次（`kind=ssl` 不重试、不自动渲染）；可选 `./data/ca-bundle.pem`。响应契约不新增字段。不默认信任代理 MITM CA
 - 0.10.0：`ARACHNE_AUTO_RENDER_ON`（含 `unauthorized_upstream`）、Fernet `auto-<host>` 读写；响应契约不新增字段；复用需要 `ARACHNE_SESSION_KEY`。P10′ 把同一行为写成调用方契约（§3.0）：无 `/browse`，验证码/登录墙要人，有状态浏览器会话推迟，外部浏览器池不计划
@@ -836,7 +841,7 @@ flowchart LR
 
 ## 8. 验收（P7a）
 
-1. `uvicorn app.main:app` 可在**未安装 Playwright**、**未配置 LLM key**、**REQUIRE_AUTH=false** 时启动；OpenAPI version `0.11.0`  
+1. `uvicorn app.main:app` 可在**未安装 Playwright**、**未配置 LLM key**、**REQUIRE_AUTH=false** 时启动；OpenAPI version `0.11.1`  
 2. `ARACHNE_REQUIRE_AUTH=true` 且 `ARACHNE_API_KEYS` 为空 → lifespan 拒绝启动  
 3. 鉴权开：无 key / 错 key → `unauthorized`（401）；Bearer 或 `X-Arachne-Key` 均可；`/health` 与 `/ready` 免鉴权；`/metrics`、`/stats` 受 `*_PUBLIC` 控制  
 4. `POST /profiles` 在 `ARACHNE_PROFILES_WRITE` 未开时 → `forbidden`（403），即使鉴权关闭  

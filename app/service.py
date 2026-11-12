@@ -35,6 +35,7 @@ from app.profiles.suggest import suggest_from_html
 from app.proxy_util import redact_url_userinfo
 from app.render import render_url
 from app.ssrf import parse_http_url
+from app.threads import run_in_cpu_pool
 
 
 @dataclass(frozen=True)
@@ -134,7 +135,8 @@ async def extract_page(
         cookies=cookies,
         render=render,
     )
-    return _extract_response(
+    return await run_in_cpu_pool(
+        _extract_response,
         page,
         requested=requested,
         site_profile=site_profile,
@@ -320,17 +322,19 @@ async def run_extract(
             )
             if auto_render:
                 stats.record_auto_render()
-            session_persist = persist_auto_session(
-                requested,
-                browser_cookies,
-                session_id_provided=session_id is not None,
-            )
-            result = _extract_response(
-                page,
-                requested=requested,
-                site_profile=explicit,
-                profiles=profiles,
-            )
+        session_persist = await run_in_cpu_pool(
+            persist_auto_session,
+            requested,
+            browser_cookies,
+            session_id_provided=session_id is not None,
+        )
+        result = await run_in_cpu_pool(
+            _extract_response,
+            page,
+            requested=requested,
+            site_profile=explicit,
+            profiles=profiles,
+        )
         render_used = bool(auto_render or render)
         if auto_render:
             key = cache_key(

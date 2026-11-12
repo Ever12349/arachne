@@ -24,6 +24,7 @@ from app.jobs.router import router as jobs_router
 from app.jobs.store import JobStore
 from app.jobs.worker import JobWorker
 from app.limits import FixedWindowRateLimiter, Stats, extract_semaphore
+from app.threads import shutdown_cpu_pool, start_cpu_pool
 from app.logging_setup import REQUEST_ID_HEADER, request_id_var, resolve_request_id, setup_logging
 from app.metrics import METRICS_CONTENT_TYPE, render_metrics
 from app.models import ErrorResponse, ExtractRequest, ExtractResponse, StatsResponse
@@ -83,6 +84,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         app.state.extract_semaphore = extract_semaphore(config.MAX_CONCURRENCY)
         app.state.stats = Stats()
+        app.state.cpu_pool = start_cpu_pool()
         app.state.profile_registry = ProfileRegistry.from_config()
         store = JobStore(session_factory(engine))
         app.state.job_store = store
@@ -103,12 +105,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 with suppress(asyncio.CancelledError):
                     await cleanup_task
             await worker.stop()
+            await shutdown_cpu_pool()
             await engine.dispose()
 
 
 app = FastAPI(
     title="arachne",
-    version="0.11.0",
+    version="0.11.1",
     description=(
         "AI-agent service: URL → structured page JSON. Primary API is POST /extract; "
         "jobs reuse the same fetch. There is no /browse endpoint. "
