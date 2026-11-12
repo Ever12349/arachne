@@ -28,6 +28,11 @@ def test_normalize_keeps_query_order():
     assert left != right
 
 
+def test_normalize_cache_url_invalid_port_does_not_raise():
+    raw = "https://example.com:65536/a"
+    assert normalize_cache_url(raw) == raw
+
+
 def test_session_fingerprint_is_stable_and_order_independent():
     a = session_fingerprint({"Authorization": "Bearer x", "Accept": "text/html"}, {"b": "2", "a": "1"})
     b = session_fingerprint({"Accept": "text/html", "Authorization": "Bearer x"}, {"a": "1", "b": "2"})

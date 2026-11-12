@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import threading
 import time
 import uuid
@@ -220,3 +222,36 @@ def test_job_items_do_consume_qps(api_client: TestClient):
     assert job["status"] == "completed"
     stats = api_client.get("/stats").json()
     assert stats["requests_total"] >= 1
+
+
+def test_job_accepts_userinfo_and_fails_at_run(
+    api_client: TestClient, caplog: pytest.LogCaptureFixture
+):
+    raw = "https://alice:s3cret@example.com/private?x=1"
+    caplog.set_level(logging.INFO, logger="arachne")
+    response = api_client.post("/jobs", json={"items": [{"url": raw}]})
+    assert response.status_code == 202
+    job = _poll_job(api_client, response.json()["job_id"])
+    assert job["status"] == "completed"
+    assert job["failed_count"] == 1
+    item = job["items"][0]
+    assert item["url"] == raw
+    assert item["status"] == "failed"
+    error = item["result"]["error"]
+    assert error["code"] == "bad_url"
+    blob = json.dumps(error)
+    assert "s3cret" not in blob
+    assert "s3cret" not in caplog.text
+
+
+def test_job_accepts_port_zero_and_fails_at_run(api_client: TestClient):
+    raw = "https://example.com:0/x"
+    response = api_client.post("/jobs", json={"items": [{"url": raw}]})
+    assert response.status_code == 202
+    job = _poll_job(api_client, response.json()["job_id"])
+    assert job["status"] == "completed"
+    item = job["items"][0]
+    assert item["url"] == raw
+    assert item["status"] == "failed"
+    assert item["result"]["error"]["code"] == "bad_url"
+

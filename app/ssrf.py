@@ -45,17 +45,32 @@ def is_blocked_ip(raw: str) -> bool:
 
 
 def parse_http_url(url: str) -> tuple[str, str, int]:
-    """Return (scheme, hostname, port). Raises ArachneError(bad_url) if not http(s)."""
+    """Return (scheme, hostname, port). Raises ArachneError(bad_url) if not http(s).
+
+    Userinfo (`user:pass@host`) is rejected. A path like `/@alice` is not
+    userinfo and is allowed. Port 0 is rejected; 1–65535 are allowed.
+    An omitted port becomes 443 for https and 80 for http.
+    """
     if not url or not url.strip():
         raise bad_url("URL is empty")
-    parsed = urlparse(url.strip())
+    try:
+        parsed = urlparse(url.strip())
+        username = parsed.username
+        port = parsed.port
+        host = parsed.hostname
+    except ValueError as exc:
+        raise bad_url("URL is invalid") from exc
     scheme = (parsed.scheme or "").lower()
     if scheme in _BLOCKED_SCHEMES or scheme not in {"http", "https"}:
         raise bad_url("Only http and https URLs are allowed", {"scheme": scheme})
-    host = parsed.hostname
+    if username is not None:
+        raise bad_url("URL must not include userinfo")
     if not host:
         raise bad_url("URL is missing a hostname")
-    port = parsed.port or (443 if scheme == "https" else 80)
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    elif port < 1 or port > 65535:
+        raise bad_url("URL port is not allowed", {"port": port})
     return scheme, host, port
 
 

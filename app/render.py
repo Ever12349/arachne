@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from app import config
 from app.errors import ArachneError, render_failed, render_unavailable
 from app.fetch import FetchedPage
-from app.proxy_util import playwright_proxy
+from app.proxy_util import playwright_proxy, redact_url_userinfo
 from app.ssrf import assert_public_http_url
 
 logger = logging.getLogger("arachne")
@@ -114,5 +114,5 @@ async def render_url(
     except ArachneError:
         raise
     except Exception:
-        logger.info("render failed url=%s", url)
+        logger.info("render failed url=%s", redact_url_userinfo(url))
         raise render_failed() from None

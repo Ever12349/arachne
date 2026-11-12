@@ -91,7 +91,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="arachne",
-    version="0.10.2",
+    version="0.10.3",
     description=(
         "AI-agent service: URL → structured page JSON. Primary API is POST /extract; "
         "jobs reuse the same fetch. There is no /browse endpoint. "

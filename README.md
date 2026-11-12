@@ -6,7 +6,7 @@ The service fetches HTML with `httpx` (optional headless Playwright) and extract
 
 This is a **trusted single-instance / intranet sidecar**. Do not run multiple replicas (SQLite + in-process worker). Terminate TLS at a reverse proxy; the app speaks HTTP. Optional shared API keys are not OAuth and are not bound to a client.
 
-API contract version **0.10.2**.
+API contract version **0.10.3**.
 
 ## Caller contract
 
@@ -410,6 +410,8 @@ Success (200):
 `main_text` is hard-capped at 100_000 characters. If you pass `max_chars`, it is clamped to `[1, 100000]` and `main_text` is cut to that length. `truncated` is `true` only when text was cut. There is no `cached` field on the success body; cache hits are counted in logs and `/stats` only. Cache keys include the merged session fingerprint, `render`, `ua_strategy`, and `profile_id@version`.
 
 POST headers are allowlisted: `Authorization`, `Accept`, `Accept-Language`, `User-Agent`, `Referer`, `Cache-Control`. `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, and `Cookie` are stripped (`Cookie` only via the `cookies` field or session `cookies`). A caller or session `User-Agent` overrides `ARACHNE_USER_AGENT` and `ua_strategy=rotate`. The shared HTTP client does not store cookies across requests. Caller and session cookies are host-only for that one fetch: they follow same-host redirects, including `http` → `https`, but are not sent to a different hostname or from `https` to `http`. `Set-Cookie` on a hop is kept only for the rest of that fetch and follows httpx Domain, Path, and Secure rules. Redirects are followed only for 301, 302, 303, 307, and 308 with a non-empty `Location`; an empty or whitespace `Location` is treated as the final response. `Authorization` is dropped when the origin changes, except a same-host `http:80` → `https:443` upgrade. `Referer` is not rewritten.
+
+A request URL may not include userinfo (`https://user:pass@host/…`). A path such as `/@alice` is not userinfo and is allowed. Port `0` is rejected; ports `1`–`65535` are allowed, and an omitted port is `443` for `https` and `80` for `http`. These checks run at the start of `/extract` and `/profiles/suggest`, before session load, QPS, or cache. `POST /jobs` still accepts the URL as submitted and stores it unchanged; that item fails at run with `bad_url`. Logs and error details redact userinfo and keep the path and query.
 
 Timeouts and connection errors are retried (`ARACHNE_MAX_RETRIES=2`, backoff 0.5s then 1s). 4xx and challenge pages are not retried. TLS verification failures are `fetch_failed` with `detail.kind=ssl` and are not retried as connect errors. 2xx HTML or 401/403 bodies that match high-precision challenge markers (`cf-challenge`, `_cf_chl`, `just a moment`, `attention required`, …) are `challenge_detected` (403). Other 401/403 stay `unauthorized_upstream` (502).
 
