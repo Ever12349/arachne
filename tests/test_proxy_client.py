@@ -12,7 +12,7 @@ import pytest
 
 from app.errors import ArachneError
 from app.fetch import create_http_client, ssrf_request_hook
-from app.proxy_util import playwright_proxy, redact_proxy_url
+from app.proxy_util import playwright_proxy, redact_proxy_url, redact_url_userinfo
 from app.tls_aia import aia_timeout, peer_capture_ssl_context
 from app.transport import PinIPAsyncTransport
 
@@ -230,3 +230,19 @@ async def test_render_launch_uses_same_proxy(monkeypatch: pytest.MonkeyPatch, pu
         "username": "alice",
         "password": "s3cret",
     }
+
+
+def test_redact_url_userinfo_keeps_path_and_query():
+    assert (
+        redact_url_userinfo("https://alice:s3cret@example.com/private?x=1#f")
+        == "https://***:***@example.com/private?x=1#f"
+    )
+    assert redact_url_userinfo("https://example.com/@alice") == "https://example.com/@alice"
+
+
+def test_redact_url_userinfo_hides_password_when_port_is_invalid():
+    redacted = redact_url_userinfo("https://alice:s3cret@example.com:99999/path?q=1")
+    assert "s3cret" not in redacted
+    assert "/path?q=1" in redacted
+    assert "example.com:99999" in redacted
+

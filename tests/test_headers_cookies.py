@@ -172,3 +172,29 @@ def test_secrets_not_logged(public_dns, monkeypatch: pytest.MonkeyPatch, caplog:
     assert "SECRETTOKEN" not in text
     assert "Bearer " not in text
     assert "cache=miss" in text or "cache=hit" in text
+
+
+def test_userinfo_rejected_and_not_logged(api_client: TestClient, caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.INFO, logger="arachne")
+    response = api_client.post(
+        "/extract",
+        json={"url": "https://alice:s3cret@example.com/private?x=1"},
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "bad_url"
+    assert "s3cret" not in response.text
+    assert "s3cret" not in caplog.text
+
+
+def test_port_zero_is_bad_url(api_client: TestClient):
+    response = api_client.post("/extract", json={"url": "https://example.com:0/"})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "bad_url"
+
+
+def test_path_at_user_is_not_userinfo(public_dns, api_client: TestClient):
+    response = api_client.post("/extract", json={"url": "https://example.com/@alice"})
+    assert response.status_code == 200
+    assert response.json()["requested_url"].endswith("/@alice")
+

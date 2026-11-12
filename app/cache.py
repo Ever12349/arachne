@@ -22,7 +22,10 @@ def normalize_cache_url(url: str) -> str:
     if not scheme or not host:
         return (url or "").strip()
 
-    port = parsed.port
+    try:
+        port = parsed.port
+    except ValueError:
+        return (url or "").strip()
     default_port = 80 if scheme == "http" else 443 if scheme == "https" else None
     host_part = f"[{host}]" if ":" in host else host
     if port is None or (default_port is not None and port == default_port):

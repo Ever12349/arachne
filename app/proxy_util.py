@@ -35,6 +35,43 @@ def redact_proxy_url(url: str) -> str:
     return urlunsplit((scheme, netloc, "", "", ""))
 
 
+def _redact_userinfo_fallback(url: str) -> str:
+    """Hide userinfo when urlsplit cannot parse the authority (for example a bad port)."""
+    scheme, sep, rest = url.partition("://")
+    if not sep:
+        return "***"
+    authority, slash, remainder = rest.partition("/")
+    if "@" not in authority:
+        return url
+    hostport = authority.rsplit("@", 1)[-1]
+    return f"{scheme}://***:***@{hostport}{slash}{remainder}"
+
+
+def redact_url_userinfo(url: str) -> str:
+    """Drop userinfo so logs and error details can name a page URL.
+
+    Path, query, and fragment are kept. Unlike ``redact_proxy_url``, this
+    does not strip the path. An invalid port still hides userinfo when
+    the authority contains ``@``.
+    """
+    try:
+        parsed = urlsplit(url)
+        username = parsed.username
+        password = parsed.password
+        host = parsed.hostname or ""
+        port = parsed.port
+    except ValueError:
+        return _redact_userinfo_fallback(url)
+    if username is None and password is None:
+        return url
+    if ":" in host:
+        host = f"[{host}]"
+    netloc = f"***:***@{host}" if host else "***:***"
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
+
 def configured_proxy_url() -> str | None:
     """Return the proxy URL, or None when proxying is off.
 

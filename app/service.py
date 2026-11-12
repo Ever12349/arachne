@@ -30,7 +30,9 @@ from app.profiles.apply import extract_with_profile
 from app.profiles.loader import ProfileRegistry, resolve_profile
 from app.profiles.models import SuggestResponse, SuggestStrategy
 from app.profiles.suggest import suggest_from_html
+from app.proxy_util import redact_url_userinfo
 from app.render import render_url
+from app.ssrf import parse_http_url
 
 logger = logging.getLogger("arachne")
 
@@ -149,7 +151,7 @@ def _extract_response(
     except ArachneError:
         raise
     except Exception:
-        logger.exception("extract failed for %s", requested)
+        logger.exception("extract failed for %s", redact_url_userinfo(requested))
         raise
 
 
@@ -169,7 +171,7 @@ def _log_extract(
     logger.info(
         "extract url=%s cache=%s latency_ms=%.2f error_code=%s session=%s profile=%s "
         "qps_wait_ms=%.2f auto_render=%s session_persist=%s",
-        url,
+        redact_url_userinfo(url),
         cache_status or "-",
         latency_ms,
         error_code or "-",
@@ -238,6 +240,7 @@ async def run_extract(
         )
 
     try:
+        parse_http_url(requested)
         merged = resolve_session_material(requested, session_id, cookies, headers)
         safe_headers = filter_request_headers(merged.headers)
         safe_cookies = dict(merged.cookies)
@@ -336,7 +339,7 @@ def _log_suggest(
 ) -> None:
     logger.info(
         "suggest url=%s strategy=%s latency_ms=%.2f error_code=%s session=%s qps_wait_ms=%.2f auto_render=%s",
-        url,
+        redact_url_userinfo(url),
         strategy or "-",
         latency_ms,
         error_code or "-",
@@ -371,6 +374,7 @@ async def run_suggest(
     auto_render = 0
 
     try:
+        parse_http_url(requested)
         merged = resolve_session_material(requested, session_id, cookies, headers)
         safe_headers = filter_request_headers(merged.headers)
         safe_cookies = dict(merged.cookies)

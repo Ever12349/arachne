@@ -123,3 +123,49 @@ def test_parse_http_url_defaults_port():
     assert port == 443
     scheme, host, port = parse_http_url("http://example.com:8080/")
     assert port == 8080
+
+
+def test_parse_http_url_rejects_userinfo():
+    from app.errors import ArachneError
+
+    for url in (
+        "https://alice:secret@example.com/path",
+        "https://alice@example.com/",
+        "https://:secret@example.com/",
+        "https://@example.com/",
+    ):
+        with pytest.raises(ArachneError) as exc:
+            parse_http_url(url)
+        assert exc.value.code == "bad_url"
+        assert "userinfo" in exc.value.message
+        assert "secret" not in exc.value.message
+        assert "secret" not in str(exc.value.detail)
+
+
+def test_parse_http_url_allows_path_at_user():
+    scheme, host, port = parse_http_url("https://example.com/@alice")
+    assert scheme == "https"
+    assert host.lower() == "example.com"
+    assert port == 443
+
+
+def test_parse_http_url_rejects_port_zero_and_out_of_range():
+    from app.errors import ArachneError
+
+    with pytest.raises(ArachneError) as exc:
+        parse_http_url("https://example.com:0/x")
+    assert exc.value.code == "bad_url"
+    assert exc.value.detail.get("port") == 0
+
+    with pytest.raises(ArachneError) as exc:
+        parse_http_url("https://example.com:65536/x")
+    assert exc.value.code == "bad_url"
+    assert "65536" not in str(exc.value.detail) or exc.value.message == "URL is invalid"
+
+
+def test_parse_http_url_allows_port_bounds():
+    _, _, port = parse_http_url("http://example.com:1/")
+    assert port == 1
+    _, _, port = parse_http_url("https://example.com:65535/")
+    assert port == 65535
+
