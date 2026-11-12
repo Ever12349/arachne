@@ -118,4 +118,4 @@ class JobWorker:
                     ErrorBody(code=INTERNAL, message="Internal server error", detail={}),
                 )
                 return
-            await self.store.succeed_item(job.job_id, item.index, result)
+            await self.store.succeed_item(job.job_id, item.index, result.response)

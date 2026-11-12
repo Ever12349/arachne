@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 from urllib.parse import urlparse, urlunparse
 
 from cachetools import TTLCache
@@ -78,6 +79,14 @@ def cache_key(
     )
 
 
+@dataclass(frozen=True)
+class CacheEntry:
+    """A cached success body plus whether it came from Playwright."""
+
+    response: ExtractResponse
+    render_used: bool = False
+
+
 class ResultCache:
     """TTLCache of successful ExtractResponse values. Not used for errors."""
 
@@ -93,16 +102,36 @@ class ResultCache:
             self._cache = TTLCache(maxsize=maxsize, ttl=ttl, timer=timer)
         self._lock = asyncio.Lock()
 
-    async def get(self, key: CacheKey | tuple[str, ...]) -> ExtractResponse | None:
+    async def get_entry(self, key: CacheKey | tuple[str, ...]) -> CacheEntry | None:
         async with self._lock:
             value = self._cache.get(key)
             if value is None:
                 return None
-            return value.model_copy(deep=True)
+            if isinstance(value, CacheEntry):
+                return CacheEntry(
+                    response=value.response.model_copy(deep=True),
+                    render_used=value.render_used,
+                )
+            return CacheEntry(response=value.model_copy(deep=True), render_used=False)
 
-    async def set(self, key: CacheKey | tuple[str, ...], value: ExtractResponse) -> None:
+    async def get(self, key: CacheKey | tuple[str, ...]) -> ExtractResponse | None:
+        entry = await self.get_entry(key)
+        if entry is None:
+            return None
+        return entry.response
+
+    async def set(
+        self,
+        key: CacheKey | tuple[str, ...],
+        value: ExtractResponse,
+        *,
+        render_used: bool = False,
+    ) -> None:
         async with self._lock:
-            self._cache[key] = value.model_copy(deep=True)
+            self._cache[key] = CacheEntry(
+                response=value.model_copy(deep=True),
+                render_used=render_used,
+            )
 
     def __len__(self) -> int:
         return len(self._cache)

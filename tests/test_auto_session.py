@@ -94,7 +94,7 @@ def _bind(
 async def _extract(**kwargs):
     stats = kwargs.pop("stats", None) or Stats()
     cache = kwargs.pop("cache", None) or ResultCache()
-    return await run_extract(
+    result = await run_extract(
         url=kwargs.pop("url", URL),
         client=None,  # type: ignore[arg-type]
         cache=cache,
@@ -103,6 +103,7 @@ async def _extract(**kwargs):
         stats=stats,
         **kwargs,
     )
+    return result.response
 
 
 def _suggest_body() -> SuggestResponse:

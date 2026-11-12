@@ -103,7 +103,8 @@ async def test_auto_render_success_caches_render_bit_and_one_qps_slot(
             semaphore=sem,
             stats=stats,
         )
-    assert result.title
+    assert result.response.title
+    assert result.render_used is True
     assert calls == {"fetch": 1, "render": 1}
     assert limiter.calls == 1
     assert stats.auto_renders == 1
@@ -111,8 +112,25 @@ async def test_auto_render_success_caches_render_bit_and_one_qps_slot(
     assert await cache.get(cache_key(url, {}, {})) is None
     assert await cache.get(cache_key(url, {}, {}, render=True)) is not None
     assert "auto_render=1" in caplog.text
+    assert "render_used=1" in caplog.text
     assert "qps_wait_ms=" in caplog.text
-    assert "render_used" not in result.model_dump()
+    assert "render_used" not in result.response.model_dump()
+
+    reused = await run_extract(
+        url=url,
+        client=None,  # type: ignore[arg-type]
+        render=False,
+        cache=cache,
+        limiter=limiter,
+        semaphore=sem,
+        stats=stats,
+    )
+    assert reused.render_used is True
+    assert reused.response.title == result.response.title
+    assert calls == {"fetch": 1, "render": 1}
+    assert stats.auto_renders == 1
+    assert limiter.calls == 2
+    assert "auto_render=0" in caplog.text
 
     await run_extract(
         url=url,
@@ -124,7 +142,7 @@ async def test_auto_render_success_caches_render_bit_and_one_qps_slot(
         stats=stats,
     )
     assert calls["render"] == 1
-    assert limiter.calls == 2
+    assert limiter.calls == 3
 
 
 async def test_auto_render_skipped_without_playwright(monkeypatch: pytest.MonkeyPatch):
@@ -197,7 +215,8 @@ async def test_explicit_render_does_not_fetch_first(monkeypatch: pytest.MonkeyPa
         semaphore=asyncio.Semaphore(1),
         stats=stats,
     )
-    assert result.title
+    assert result.response.title
+    assert result.render_used is True
     assert stats.auto_renders == 0
 
 
@@ -289,7 +308,7 @@ def _both_codes() -> frozenset[str]:
 
 
 async def _extract(monkeypatch: pytest.MonkeyPatch, stats: Stats, **kwargs: object):
-    return await run_extract(
+    result = await run_extract(
         url="https://example.com/article",
         client=None,  # type: ignore[arg-type]
         cache=ResultCache(),
@@ -298,6 +317,7 @@ async def _extract(monkeypatch: pytest.MonkeyPatch, stats: Stats, **kwargs: obje
         stats=stats,
         **kwargs,  # type: ignore[arg-type]
     )
+    return result.response
 
 
 async def test_unauthorized_auto_renders_when_enabled(monkeypatch: pytest.MonkeyPatch):
@@ -428,3 +448,93 @@ async def test_ssl_fetch_failed_does_not_auto_render(monkeypatch: pytest.MonkeyP
     assert exc.value.detail["kind"] == "ssl"
     assert "fetch_failed" not in _both_codes()
     assert stats.auto_renders == 0
+
+
+async def test_render_true_does_not_fallback_to_httpx_cache(monkeypatch: pytest.MonkeyPatch):
+    calls = {"fetch": 0, "render": 0}
+
+    async def fake_fetch(*_args, **_kwargs):
+        calls["fetch"] += 1
+        return _page("<html><head><title>Httpx</title></head><body><p>httpx body</p></body></html>")
+
+    async def fake_render(url: str, **_kwargs):
+        calls["render"] += 1
+        return _rendered(
+            _page("<html><head><title>Rendered</title></head><body><p>rendered body</p></body></html>", url)
+        )
+
+    monkeypatch.setattr("app.service.fetch_with_retries", fake_fetch)
+    monkeypatch.setattr("app.service.render_url", fake_render)
+    monkeypatch.setattr("app.render.playwright_available", lambda: True)
+    cache = ResultCache()
+    url = "https://example.com/article"
+    httpx_result = await run_extract(
+        url=url,
+        client=None,  # type: ignore[arg-type]
+        render=False,
+        cache=cache,
+        limiter=_Limiter(),
+        semaphore=asyncio.Semaphore(1),
+        stats=Stats(),
+    )
+    assert httpx_result.render_used is False
+    assert calls == {"fetch": 1, "render": 0}
+
+    rendered = await run_extract(
+        url=url,
+        client=None,  # type: ignore[arg-type]
+        render=True,
+        cache=cache,
+        limiter=_Limiter(),
+        semaphore=asyncio.Semaphore(1),
+        stats=Stats(),
+    )
+    assert rendered.render_used is True
+    assert rendered.response.title != httpx_result.response.title
+    assert calls == {"fetch": 1, "render": 1}
+
+
+async def test_render_false_reuses_cached_render_when_auto_render_off(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls = {"fetch": 0, "render": 0}
+
+    async def fake_fetch(*_args, **_kwargs):
+        calls["fetch"] += 1
+        raise AssertionError("httpx should not run on a rendered cache hit")
+
+    async def fake_render(url: str, **_kwargs):
+        calls["render"] += 1
+        return _rendered(_page(SAMPLE_HTML, url))
+
+    monkeypatch.setattr("app.service.fetch_with_retries", fake_fetch)
+    monkeypatch.setattr("app.service.render_url", fake_render)
+    monkeypatch.setattr("app.render.playwright_available", lambda: True)
+    monkeypatch.setattr("app.config.AUTO_RENDER", False)
+    cache = ResultCache()
+    url = "https://example.com/article"
+    first = await run_extract(
+        url=url,
+        client=None,  # type: ignore[arg-type]
+        render=True,
+        cache=cache,
+        limiter=_Limiter(),
+        semaphore=asyncio.Semaphore(1),
+        stats=Stats(),
+    )
+    assert first.render_used is True
+    assert calls["render"] == 1
+
+    reused = await run_extract(
+        url=url,
+        client=None,  # type: ignore[arg-type]
+        render=False,
+        cache=cache,
+        limiter=_Limiter(),
+        semaphore=asyncio.Semaphore(1),
+        stats=Stats(),
+    )
+    assert reused.render_used is True
+    assert reused.response.title == first.response.title
+    assert calls == {"fetch": 0, "render": 1}
+

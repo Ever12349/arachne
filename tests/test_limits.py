@@ -113,7 +113,8 @@ async def test_cache_hit_skips_semaphore():
         ),
         timeout=0.5,
     )
-    assert result.main_text == "cached-text"
+    assert result.response.main_text == "cached-text"
+    assert result.render_used is False
 
 
 @pytest.mark.asyncio

@@ -200,3 +200,22 @@ def test_max_chars_does_not_bust_cache(public_dns, monkeypatch: pytest.MonkeyPat
         assert counts["n"] == 1
         assert r2.json()["truncated"] is True
         assert len(r2.json()["main_text"]) <= 8
+
+
+@pytest.mark.asyncio
+async def test_get_entry_roundtrips_render_used():
+    cache = ResultCache()
+    key = ("u", "s", "1", "default", "")
+    await cache.set(key, _dummy("rendered"), render_used=True)
+    body = await cache.get(key)
+    assert body is not None
+    assert body.main_text == "rendered"
+    entry = await cache.get_entry(key)
+    assert entry is not None
+    assert entry.render_used is True
+    assert entry.response.main_text == "rendered"
+    entry.response.main_text = "mutated"
+    again = await cache.get_entry(key)
+    assert again is not None
+    assert again.response.main_text == "rendered"
+
