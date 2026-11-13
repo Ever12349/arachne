@@ -134,6 +134,8 @@ docker compose up --build -d
 
 Compose mounts `./data:/app/data` so `arachne.db`, sessions, and profiles survive container recreation. The default `ARACHNE_DATABASE_URL` is `sqlite+aiosqlite:///./data/arachne.db`. An optional `./data/ca-bundle.pem` in that directory is extra trust for incomplete TLS chains (see above); it is not a Clash CA.
 
+Compose forwards `ARACHNE_*` settings from the host environment or a gitignored `.env` (proxy, session key, profile-write gate, auto-render). Defaults match the process defaults: proxy off, `ARACHNE_PROFILES_WRITE` off. Do not put secrets in `docker-compose.yml`. The Playwright service also adds `host.docker.internal:host-gateway` so a host-side proxy works on Docker Engine.
+
 Playwright image (Chromium + system deps). Compose profile `playwright` builds `Dockerfile.playwright` and does not start with a plain `docker compose up`:
 
 ```bash
@@ -164,7 +166,7 @@ Docker Hub timeouts and PyPI timeouts are independent. A DaoCloud (or other) bas
 docker compose -f docker-compose.yml -f docker-compose.mirror.yml up --build -d
 ```
 
-Defaults in the overlay: `PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.12-slim` and Aliyun pip (`https://mirrors.aliyun.com/pypi/simple`). Public mirrors change; swap hosts if one is down. Tsinghua (`https://pypi.tuna.tsinghua.edu.cn/simple`) may return HTTP 403 from some networks and Docker builds; it remains an alternate: `PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple` and `PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn`.
+Defaults in the overlay: `PYTHON_IMAGE=docker.m.daocloud.io/library/python:3.12-slim` and Aliyun pip (`https://mirrors.aliyun.com/pypi/simple`). The Playwright image also sets `APT_MIRROR=mirrors.ustc.edu.cn` for `playwright install --with-deps` (official `deb.debian.org` often times out from mainland networks; Aliyun's Trixie index and Tsinghua's pool have returned 403 from some Docker builds). Public mirrors change; swap hosts if one is down. An empty `APT_MIRROR` keeps the image's official Debian sources. Tsinghua pip (`https://pypi.tuna.tsinghua.edu.cn/simple`) may return HTTP 403 from some networks and Docker builds; it remains an alternate: `PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple` and `PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn`.
 
 Override without editing files:
 

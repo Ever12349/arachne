@@ -2,7 +2,9 @@
 # Terminate TLS at a reverse proxy in front; this container speaks HTTP.
 # Production intranet: set ARACHNE_REQUIRE_AUTH=true and ARACHNE_API_KEYS=...
 #
-# Optional env (process defaults; not baked into the image):
+# Optional env (process defaults; not baked into the image). Compose forwards the
+# values below from the host environment or a gitignored `.env`. Do not put
+# secrets in this file.
 #   ARACHNE_HTTP_PROXY         empty = direct. http(s) URL for httpx and Playwright. No request-body proxy.
 #   ARACHNE_QPS_MODE           queue (default) | reject. queue waits for the 1s window; reject is immediate 429.
 #   ARACHNE_QPS_WAIT_SECONDS   default 30. <=0 does not wait (immediate 429 when the window is full).
@@ -23,6 +25,12 @@ services:
     ports:
       - "8000:8000"
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      ARACHNE_PROFILES_WRITE: ${ARACHNE_PROFILES_WRITE:-0}
+      ARACHNE_HTTP_PROXY: ${ARACHNE_HTTP_PROXY:-}
+      ARACHNE_SESSION_KEY: ${ARACHNE_SESSION_KEY:-}
     volumes:
       - ./data:/app/data
 
@@ -34,5 +42,14 @@ services:
     ports:
       - "8000:8000"
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      ARACHNE_PROFILES_WRITE: ${ARACHNE_PROFILES_WRITE:-0}
+      ARACHNE_HTTP_PROXY: ${ARACHNE_HTTP_PROXY:-}
+      ARACHNE_SESSION_KEY: ${ARACHNE_SESSION_KEY:-}
+      ARACHNE_SESSION_PERSIST: ${ARACHNE_SESSION_PERSIST:-true}
+      ARACHNE_AUTO_RENDER: ${ARACHNE_AUTO_RENDER:-true}
+      ARACHNE_AUTO_RENDER_ON: ${ARACHNE_AUTO_RENDER_ON:-challenge,unauthorized}
     volumes:
       - ./data:/app/data
