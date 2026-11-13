@@ -22,6 +22,13 @@ RUN if [ -n "$PIP_INDEX_URL" ]; then \
       fi; \
     else \
       pip install --no-cache-dir -r requirements.txt -r requirements-playwright.txt; \
+    fi
+
+# Optional Debian apt mirror for `playwright install --with-deps`. Empty keeps official sources.
+ARG APT_MIRROR=
+RUN if [ -n "$APT_MIRROR" ]; then \
+      (sed -i "s|deb.debian.org|${APT_MIRROR}|g; s|security.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null || true) \
+      && (sed -i "s|deb.debian.org|${APT_MIRROR}|g; s|security.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list 2>/dev/null || true); \
     fi \
     && playwright install --with-deps chromium \
     && chmod -R 755 /ms-playwright

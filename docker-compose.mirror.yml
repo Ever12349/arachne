@@ -1,5 +1,5 @@
 # Overlay for environments where Docker Hub and/or PyPI are blocked (e.g. mainland China).
-# Public mirrors change; swap PYTHON_IMAGE / PIP_INDEX_URL if a host is unreachable.
+# Public mirrors change; swap PYTHON_IMAGE / PIP_INDEX_URL / APT_MIRROR if a host is unreachable.
 # Usage: docker compose -f docker-compose.yml -f docker-compose.mirror.yml up --build -d
 # Playwright profile: add `--profile playwright` and the service name `arachne-playwright`.
 services:
@@ -19,3 +19,4 @@ services:
         PYTHON_IMAGE: docker.m.daocloud.io/library/python:3.12-slim
         PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
         PIP_TRUSTED_HOST: mirrors.aliyun.com
+        APT_MIRROR: mirrors.ustc.edu.cn
